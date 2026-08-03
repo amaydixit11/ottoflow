@@ -8,9 +8,10 @@ that can be found in the LICENSE.md file.
 package executor
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
 )
@@ -164,26 +165,40 @@ func (cm *ContextManager) RecordStepCompletion(stepName string) {
 	cm.completionOrder = append(cm.completionOrder, stepName)
 }
 
-// CompletionOrder returns the recorded step completion sequence.
+// CompletionOrder returns a copy of the recorded step completion sequence, so callers
+// cannot mutate the manager's internal slice.
 func (cm *ContextManager) CompletionOrder() []string {
-	return cm.completionOrder
+	return slices.Clone(cm.completionOrder)
 }
 
 // RestoreCompletionOrder rebuilds completionOrder from persisted StepStatuses after a checkpoint
 // restore. Only succeeded steps are included (matching what RecordStepCompletion records during
 // live execution). Steps are sorted by CompletionTime to approximate the original execution order.
+//
+// A succeeded step with no CompletionTime sorts oldest, so it is pruned first by lastN rather
+// than dropped from the order entirely. metav1.Time serializes at second granularity, so equal
+// timestamps are common after a checkpoint round-trip on fast workflows; the name tie-break
+// exists only to make the result deterministic — it does not recover true execution order.
+// A stable sort alone would not help here: the input is a map range, so pre-sort order is random.
 func (cm *ContextManager) RestoreCompletionOrder(statuses map[string]ottoflowv1alpha1.StepStatus) {
 	type entry struct {
 		name string
-		t    int64 // UnixNano for sort stability
+		t    int64 // UnixNano; 0 when CompletionTime is nil, so the step sorts oldest
 	}
 	completed := make([]entry, 0, len(statuses))
 	for name, s := range statuses {
-		if s.Phase == ottoflowv1alpha1.StepPhaseSucceeded && s.CompletionTime != nil {
-			completed = append(completed, entry{name, s.CompletionTime.UnixNano()})
+		if s.Phase != ottoflowv1alpha1.StepPhaseSucceeded {
+			continue
 		}
+		var t int64
+		if s.CompletionTime != nil {
+			t = s.CompletionTime.UnixNano()
+		}
+		completed = append(completed, entry{name, t})
 	}
-	sort.Slice(completed, func(i, j int) bool { return completed[i].t < completed[j].t })
+	slices.SortFunc(completed, func(a, b entry) int {
+		return cmp.Or(cmp.Compare(a.t, b.t), cmp.Compare(a.name, b.name))
+	})
 	cm.completionOrder = make([]string, len(completed))
 	for i, e := range completed {
 		cm.completionOrder[i] = e.name

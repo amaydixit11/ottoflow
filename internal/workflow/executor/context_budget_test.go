@@ -10,6 +10,8 @@ package executor
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
 )
 
@@ -202,5 +204,54 @@ func TestApplyOmitBudget_AlreadyEmptySteps(t *testing.T) {
 	steps := stepsIn(result)
 	if len(steps) != 0 {
 		t.Error("omit on already-empty steps should stay empty")
+	}
+}
+
+// RestoreCompletionOrder feeds lastN after a checkpoint restore, so its ordering must be
+// deterministic even when CompletionTime is missing or duplicated across steps.
+func TestRestoreCompletionOrder(t *testing.T) {
+	at := func(sec int64) *metav1.Time {
+		t := metav1.Unix(sec, 0)
+		return &t
+	}
+	statuses := map[string]ottoflowv1alpha1.StepStatus{
+		// No CompletionTime: must still be restored, sorting oldest.
+		"nostamp": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+		// Same second: metav1.Time has second granularity, so ties are routine.
+		"bravo":  {Phase: ottoflowv1alpha1.StepPhaseSucceeded, CompletionTime: at(100)},
+		"alpha":  {Phase: ottoflowv1alpha1.StepPhaseSucceeded, CompletionTime: at(100)},
+		"latest": {Phase: ottoflowv1alpha1.StepPhaseSucceeded, CompletionTime: at(200)},
+		// Not succeeded: excluded, matching what RecordStepCompletion records live.
+		"failed":  {Phase: ottoflowv1alpha1.StepPhaseFailed, CompletionTime: at(150)},
+		"running": {Phase: ottoflowv1alpha1.StepPhaseRunning},
+	}
+	want := []string{"nostamp", "alpha", "bravo", "latest"}
+
+	// Repeat: a single pass can pass by luck, since map range order is randomized.
+	for i := 0; i < 20; i++ {
+		cm := &ContextManager{}
+		cm.RestoreCompletionOrder(statuses)
+		got := cm.CompletionOrder()
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+		}
+	}
+}
+
+func TestCompletionOrderReturnsCopy(t *testing.T) {
+	cm := &ContextManager{}
+	cm.RecordStepCompletion("step1")
+	cm.RecordStepCompletion("step2")
+
+	got := cm.CompletionOrder()
+	got[0] = "mutated"
+
+	if again := cm.CompletionOrder(); again[0] != "step1" {
+		t.Errorf("caller mutation leaked into ContextManager: got %v", again)
 	}
 }

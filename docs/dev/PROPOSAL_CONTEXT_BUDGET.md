@@ -68,7 +68,7 @@ Add a `ContextBudgetMode` field to `StepAgentRef` with three strategies, applied
 
 - `full` (default, empty): pass all of `contextData` unchanged — current behavior, zero risk
 - `lastN`: include only the N most recently completed steps in `steps`; drop older entries
-- `omit`: strip the entire `steps` map; only `inputs` and `expressions` visible to CEL
+- `omit`: strip the entire `steps` map; `inputs`, `variables`, and `expressions` stay visible to CEL
 
 Requires tracking step completion order via `completionOrder []string` on `ContextManager`,
 appended in the main dispatch loop after each successful `executeStep`. This is safe because
@@ -117,8 +117,11 @@ Accessing `steps.stepName.response` returns the summary.
 // so no materialization cost is paid for pruned entries.
 //
 // full: all step outputs visible (default when omitted — preserves current behavior)
-// lastN: only the N most recently completed steps are visible; inputs and expressions unaffected
-// omit: step outputs are hidden; only inputs and expressions are visible
+// lastN: only the N most recently completed step outputs are visible
+// omit: no step outputs are visible
+//
+// Only the step outputs are filtered. Inputs, variables, and expressions remain fully
+// visible in every mode.
 //
 // +kubebuilder:validation:Enum=full;lastN;omit
 // +optional

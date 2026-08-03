@@ -420,9 +420,11 @@ type StepAgentRef struct {
 	// so no materialization cost is paid for entries that are filtered out.
 	//
 	// full: all step outputs are visible (default when omitted — preserves current behavior)
-	// lastN: only the N most recently completed steps are visible; inputs and expressions
-	//        are always included regardless of mode
-	// omit: step outputs are hidden entirely; only inputs and expressions are visible
+	// lastN: only the N most recently completed step outputs are visible
+	// omit: no step outputs are visible
+	//
+	// Only the step outputs are filtered. Inputs, variables, and expressions remain fully
+	// visible in every mode.
 	//
 	// +kubebuilder:validation:Enum=full;lastN;omit
 	// +optional

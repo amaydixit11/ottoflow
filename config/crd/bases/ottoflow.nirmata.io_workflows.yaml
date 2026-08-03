@@ -3495,6 +3495,28 @@ spec:
                           items:
                             type: string
                           type: array
+                        contextBudgetLastN:
+                          description: |-
+                            ContextBudgetLastN is the number of most-recently-completed steps to include when
+                            ContextBudgetMode=lastN. Steps beyond the last N are omitted from CEL context.
+                            Ignored for other modes. Defaults to 5 when omitted or zero.
+                          format: int32
+                          type: integer
+                        contextBudgetMode:
+                          description: |-
+                            ContextBudgetMode controls how much of the accumulated step context is visible to
+                            CEL evaluation when evaluating additionalPrompts. Applied before BuildVariableMap,
+                            so no materialization cost is paid for entries that are filtered out.
+
+                            full: all step outputs are visible (default when omitted — preserves current behavior)
+                            lastN: only the N most recently completed steps are visible; inputs and expressions
+                                   are always included regardless of mode
+                            omit: step outputs are hidden entirely; only inputs and expressions are visible
+                          enum:
+                          - full
+                          - lastN
+                          - omit
+                          type: string
                         maxAdditionalPromptTokens:
                           description: |-
                             MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
@@ -3675,6 +3697,28 @@ spec:
                                   items:
                                     type: string
                                   type: array
+                                contextBudgetLastN:
+                                  description: |-
+                                    ContextBudgetLastN is the number of most-recently-completed steps to include when
+                                    ContextBudgetMode=lastN. Steps beyond the last N are omitted from CEL context.
+                                    Ignored for other modes. Defaults to 5 when omitted or zero.
+                                  format: int32
+                                  type: integer
+                                contextBudgetMode:
+                                  description: |-
+                                    ContextBudgetMode controls how much of the accumulated step context is visible to
+                                    CEL evaluation when evaluating additionalPrompts. Applied before BuildVariableMap,
+                                    so no materialization cost is paid for entries that are filtered out.
+
+                                    full: all step outputs are visible (default when omitted — preserves current behavior)
+                                    lastN: only the N most recently completed steps are visible; inputs and expressions
+                                           are always included regardless of mode
+                                    omit: step outputs are hidden entirely; only inputs and expressions are visible
+                                  enum:
+                                  - full
+                                  - lastN
+                                  - omit
+                                  type: string
                                 maxAdditionalPromptTokens:
                                   description: |-
                                     MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.

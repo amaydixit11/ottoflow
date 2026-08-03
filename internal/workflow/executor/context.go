@@ -10,6 +10,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
 )
@@ -26,6 +27,7 @@ type ContextManager struct {
 	workflowRun        *ottoflowv1alpha1.WorkflowRun
 	inMemoryContext    map[string]interface{}
 	contextInitialized bool
+	completionOrder    []string // step names in execution-completion order, for ContextBudgetMode=lastN
 }
 
 // NewContextManager creates a new context manager
@@ -154,4 +156,36 @@ func (cm *ContextManager) GetContextFrom(ctx context.Context) map[string]interfa
 func (cm *ContextManager) RestoreContext(snapshot map[string]interface{}) {
 	cm.inMemoryContext = snapshot
 	cm.contextInitialized = true
+}
+
+// RecordStepCompletion appends stepName to the completion order.
+// Called by the executor after each successful executeStep for use by ContextBudgetMode=lastN.
+func (cm *ContextManager) RecordStepCompletion(stepName string) {
+	cm.completionOrder = append(cm.completionOrder, stepName)
+}
+
+// CompletionOrder returns the recorded step completion sequence.
+func (cm *ContextManager) CompletionOrder() []string {
+	return cm.completionOrder
+}
+
+// RestoreCompletionOrder rebuilds completionOrder from persisted StepStatuses after a checkpoint
+// restore. Only succeeded steps are included (matching what RecordStepCompletion records during
+// live execution). Steps are sorted by CompletionTime to approximate the original execution order.
+func (cm *ContextManager) RestoreCompletionOrder(statuses map[string]ottoflowv1alpha1.StepStatus) {
+	type entry struct {
+		name string
+		t    int64 // UnixNano for sort stability
+	}
+	completed := make([]entry, 0, len(statuses))
+	for name, s := range statuses {
+		if s.Phase == ottoflowv1alpha1.StepPhaseSucceeded && s.CompletionTime != nil {
+			completed = append(completed, entry{name, s.CompletionTime.UnixNano()})
+		}
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].t < completed[j].t })
+	cm.completionOrder = make([]string, len(completed))
+	for i, e := range completed {
+		cm.completionOrder[i] = e.name
+	}
 }

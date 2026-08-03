@@ -619,6 +619,7 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 			}
 			e.invokeProgressCallback(workflowRun, workflow)
 			e.saveCheckpoint(ctx, workflowRun, stepName)
+			e.contextManager.RecordStepCompletion(stepName)
 		}
 
 		// If we didn't execute any steps in this iteration, break to avoid infinite loop
@@ -1092,6 +1093,7 @@ func (e *WorkflowExecutor) loadCheckpointIfNeeded(ctx context.Context, workflowR
 	}
 	klog.InfoS("checkpoint: restoring from checkpoint", "lastCompletedStep", snapshot.LastCompletedStep, "steps", len(snapshot.StepStatuses))
 	e.contextManager.RestoreContext(snapshot.Context)
+	e.contextManager.RestoreCompletionOrder(snapshot.StepStatuses)
 	workflowRun.Status.StepStatuses = snapshot.StepStatuses
 	return true, nil
 }

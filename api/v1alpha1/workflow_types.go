@@ -414,6 +414,25 @@ type StepAgentRef struct {
 	// The agent's base prompt is not counted. Zero or nil means no limit.
 	// +optional
 	MaxAdditionalPromptTokens *int32 `json:"maxAdditionalPromptTokens,omitempty"`
+
+	// ContextBudgetMode controls how much of the accumulated step context is visible to
+	// CEL evaluation when evaluating additionalPrompts. Applied before BuildVariableMap,
+	// so no materialization cost is paid for entries that are filtered out.
+	//
+	// full: all step outputs are visible (default when omitted — preserves current behavior)
+	// lastN: only the N most recently completed steps are visible; inputs and expressions
+	//        are always included regardless of mode
+	// omit: step outputs are hidden entirely; only inputs and expressions are visible
+	//
+	// +kubebuilder:validation:Enum=full;lastN;omit
+	// +optional
+	ContextBudgetMode string `json:"contextBudgetMode,omitempty"`
+
+	// ContextBudgetLastN is the number of most-recently-completed steps to include when
+	// ContextBudgetMode=lastN. Steps beyond the last N are omitted from CEL context.
+	// Ignored for other modes. Defaults to 5 when omitted or zero.
+	// +optional
+	ContextBudgetLastN *int32 `json:"contextBudgetLastN,omitempty"`
 }
 
 // StepExternalAgentRef defines a call to an external A2A-compatible agent service

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.opentelemetry.io/otel"
@@ -88,6 +89,11 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 		return nil, fmt.Errorf("failed to read context: %w", err)
 	}
 
+	// Apply context budget before CEL evaluation (prevents materialization of pruned entries)
+	if agentRef.ContextBudgetMode != "" && agentRef.ContextBudgetMode != "full" {
+		contextData = applyContextBudget(contextData, agentRef, e.contextManager.CompletionOrder())
+	}
+
 	// Build variable map for CEL evaluation
 	vars := e.celEvaluator.BuildVariableMap(contextData)
 
@@ -108,14 +114,16 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 		}
 	}
 
-	// Apply token budget to additional prompts if set (rough heuristic: ~4 runes per token)
+	// Apply token budget to additional prompts if set (~3 runes per token; YAML/code tokenizes denser than prose)
 	var promptStr string
 	if len(promptParts) > 1 && agentRef.MaxAdditionalPromptTokens != nil && *agentRef.MaxAdditionalPromptTokens > 0 {
 		additionalText := strings.Join(promptParts[1:], "\n\n")
-		tokenBudget := *agentRef.MaxAdditionalPromptTokens * 4
+		tokenBudget := *agentRef.MaxAdditionalPromptTokens * 3
 		if int32(utf8.RuneCountInString(additionalText)) > tokenBudget {
 			runes := []rune(additionalText)
 			additionalText = string(runes[:tokenBudget]) + "..."
+			klog.V(2).InfoS("additionalPrompts truncated by MaxAdditionalPromptTokens",
+				"step", step.Name, "budgetTokens", *agentRef.MaxAdditionalPromptTokens)
 		}
 		promptStr = promptParts[0] + "\n\n" + additionalText
 	} else {

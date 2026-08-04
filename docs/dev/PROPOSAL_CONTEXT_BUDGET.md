@@ -1,7 +1,7 @@
 # Proposal: Context Window Budget Management for Agent Steps
 
 **Status**: Draft  
-**Issue**: [nirmata/ottoflow-enterprise#90](https://github.com/nirmata/ottoflow-enterprise/issues/90)
+**Issue**: Tracked internally
 
 ## Problem
 

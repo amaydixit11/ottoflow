@@ -126,7 +126,7 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 				if agentRef.ContextBudgetMode != "" && agentRef.ContextBudgetMode != "full" {
 					return nil, fmt.Errorf(
 						"failed to evaluate additional prompt: %w (step outputs may have been pruned by "+
-							"contextBudgetMode=%s; referenced steps must be within the last N completed steps)",
+							"contextBudgetMode=%s; ensure referenced steps are retained by the configured budget mode)",
 						err, agentRef.ContextBudgetMode)
 				}
 				return nil, fmt.Errorf("failed to evaluate additional prompt: %w", err)
@@ -143,7 +143,7 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 		additionalText := strings.Join(promptParts[1:], "\n\n")
 		truncatedText, truncated := truncateAdditionalPrompt(additionalText, *agentRef.MaxAdditionalPromptTokens)
 		if truncated {
-			klog.Warningf("additionalPrompts truncated by MaxAdditionalPromptTokens: step=%s budgetTokens=%d",
+			klog.V(2).Infof("additionalPrompts truncated by MaxAdditionalPromptTokens: step=%s budgetTokens=%d",
 				step.Name, *agentRef.MaxAdditionalPromptTokens)
 		}
 		promptStr = promptParts[0] + "\n\n" + truncatedText

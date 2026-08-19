@@ -92,6 +92,35 @@ func TestApplyContextBudget_OmitMode(t *testing.T) {
 	}
 }
 
+func TestApplyContextBudget_LastNZeroDefaultsToFive(t *testing.T) {
+	ctx := makeTestContext("s1", "s2", "s3", "s4", "s5", "s6", "s7")
+	order := []string{"s1", "s2", "s3", "s4", "s5", "s6", "s7"}
+	zero := int32(0)
+	agentRef := &ottoflowv1alpha1.StepAgentRef{ContextBudgetMode: "lastN", ContextBudgetLastN: &zero}
+	result := applyContextBudget(ctx, agentRef, order)
+	steps := stepsIn(result)
+	if len(steps) != 5 {
+		t.Errorf("zero ContextBudgetLastN should default to 5, got %d", len(steps))
+	}
+	for _, name := range []string{"s3", "s4", "s5", "s6", "s7"} {
+		if _, ok := steps[name]; !ok {
+			t.Errorf("expected step %s to be present in default-5 window", name)
+		}
+	}
+}
+
+func TestApplyContextBudget_LastNNegativeDefaultsToFive(t *testing.T) {
+	ctx := makeTestContext("s1", "s2", "s3", "s4", "s5", "s6", "s7")
+	order := []string{"s1", "s2", "s3", "s4", "s5", "s6", "s7"}
+	negative := int32(-3)
+	agentRef := &ottoflowv1alpha1.StepAgentRef{ContextBudgetMode: "lastN", ContextBudgetLastN: &negative}
+	result := applyContextBudget(ctx, agentRef, order)
+	steps := stepsIn(result)
+	if len(steps) != 5 {
+		t.Errorf("negative ContextBudgetLastN should default to 5, got %d", len(steps))
+	}
+}
+
 // applyLastNBudget tests
 
 func TestApplyLastNBudget_KeepsLastN(t *testing.T) {

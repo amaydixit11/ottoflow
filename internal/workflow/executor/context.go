@@ -171,6 +171,14 @@ func (cm *ContextManager) CompletionOrder() []string {
 	return slices.Clone(cm.completionOrder)
 }
 
+// SetCompletionOrder restores completionOrder directly from a persisted, ordered snapshot
+// (checkpoint.CompletionOrder), giving exact execution order without CompletionTime
+// reconstruction. Use RestoreCompletionOrder as a fallback for older checkpoints saved before
+// completionOrder was persisted.
+func (cm *ContextManager) SetCompletionOrder(order []string) {
+	cm.completionOrder = slices.Clone(order)
+}
+
 // RestoreCompletionOrder rebuilds completionOrder from persisted StepStatuses after a checkpoint
 // restore. Only succeeded steps are included (matching what RecordStepCompletion records during
 // live execution). Steps are sorted by CompletionTime to approximate the original execution order.

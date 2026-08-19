@@ -1093,7 +1093,13 @@ func (e *WorkflowExecutor) loadCheckpointIfNeeded(ctx context.Context, workflowR
 	}
 	klog.InfoS("checkpoint: restoring from checkpoint", "lastCompletedStep", snapshot.LastCompletedStep, "steps", len(snapshot.StepStatuses))
 	e.contextManager.RestoreContext(snapshot.Context)
-	e.contextManager.RestoreCompletionOrder(snapshot.StepStatuses)
+	if len(snapshot.CompletionOrder) > 0 {
+		// Exact order was persisted (checkpoint written after this field was added).
+		e.contextManager.SetCompletionOrder(snapshot.CompletionOrder)
+	} else {
+		// Older checkpoint without CompletionOrder: fall back to CompletionTime reconstruction.
+		e.contextManager.RestoreCompletionOrder(snapshot.StepStatuses)
+	}
 	workflowRun.Status.StepStatuses = snapshot.StepStatuses
 	return true, nil
 }
@@ -1109,6 +1115,7 @@ func (e *WorkflowExecutor) saveCheckpoint(ctx context.Context, workflowRun *otto
 		LastCompletedStep: stepName,
 		StepStatuses:      workflowRun.Status.StepStatuses,
 		Context:           e.contextManager.GetContext(),
+		CompletionOrder:   e.contextManager.CompletionOrder(),
 	})
 }
 

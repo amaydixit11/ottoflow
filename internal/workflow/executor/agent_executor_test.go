@@ -10,6 +10,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -472,3 +474,52 @@ var _ = Describe("Agent Step Execution with Mock", func() {
 		})
 	})
 })
+
+// TestTruncateAdditionalPrompt_ExactBoundaryNotTruncated: RuneCount == tokenBudget (maxTokens*3)
+// must NOT truncate. This is the exact boundary the int32-overflow fix depends on getting right.
+func TestTruncateAdditionalPrompt_ExactBoundaryNotTruncated(t *testing.T) {
+	const maxTokens = int32(10)
+	text := strings.Repeat("a", int(maxTokens)*3) // exactly at budget (30 runes)
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if truncated {
+		t.Errorf("expected no truncation when RuneCount == tokenBudget, got truncated=true, result=%q", result)
+	}
+	if result != text {
+		t.Errorf("expected text unchanged at exact boundary, got %q", result)
+	}
+}
+
+// TestTruncateAdditionalPrompt_OneOverBoundaryTruncates is the complementary case: one rune past
+// the budget must truncate.
+func TestTruncateAdditionalPrompt_OneOverBoundaryTruncates(t *testing.T) {
+	const maxTokens = int32(10)
+	text := strings.Repeat("a", int(maxTokens)*3+1) // one rune past budget
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if !truncated {
+		t.Error("expected truncation when RuneCount > tokenBudget")
+	}
+	want := strings.Repeat("a", int(maxTokens)*3) + "..."
+	if result != want {
+		t.Errorf("unexpected truncated result: got %q, want %q", result, want)
+	}
+}
+
+// TestTruncateAdditionalPrompt_LargeBudgetNoInt32Overflow guards the int64 math fix: a budget
+// whose *3 would overflow int32 (max ~715,827,882) must not panic and must not wrongly truncate.
+func TestTruncateAdditionalPrompt_LargeBudgetNoInt32Overflow(t *testing.T) {
+	const maxTokens = int32(800_000_000) // maxTokens*3 overflows int32
+	text := "short text"
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if truncated {
+		t.Errorf("short text under a huge budget must not be truncated, got %q", result)
+	}
+	if result != text {
+		t.Errorf("expected text unchanged, got %q", result)
+	}
+}

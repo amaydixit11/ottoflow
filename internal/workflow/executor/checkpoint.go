@@ -41,6 +41,14 @@ type CheckpointSnapshot struct {
 	LastCompletedStep string                                 `json:"lastCompletedStep"`
 	StepStatuses      map[string]ottoflowv1alpha1.StepStatus `json:"stepStatuses"`
 	Context           map[string]interface{}                 `json:"context"`
+	// CompletionOrder is the exact step-completion order recorded during live execution
+	// (ContextManager.CompletionOrder), persisted so ContextBudgetMode=lastN restores the same
+	// lastN window after a restart. CompletionTime has only second granularity, so
+	// reconstructing order from StepStatuses alone can't disambiguate same-second completions —
+	// this field avoids that reconstruction entirely. Omitted (empty) in checkpoints written
+	// before this field existed; loaders must fall back to StepStatuses-based reconstruction
+	// (RestoreCompletionOrder) when it's empty.
+	CompletionOrder []string `json:"completionOrder,omitempty"`
 }
 
 // CheckpointManager persists workflow checkpoints to a ConfigMap via async writes.

@@ -103,7 +103,8 @@ spec:
                           do not consume a slot in the window.
                           Ignored for other modes. Defaults to 5 when omitted or zero.
                         format: int32
-                        minimum: 1
+                        maximum: 1000
+                        minimum: 0
                         type: integer
                       contextBudgetMode:
                         description: |-
@@ -127,10 +128,10 @@ spec:
                           MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
                           When set, the evaluated additional prompt text is truncated to fit this budget, using a rough
                           heuristic of approximately 3 runes per token (code/YAML tokenizes denser than prose, so this
-                          errs conservative). The agent's base prompt is not counted. Nil means no limit.
+                          errs conservative). The agent's base prompt is not counted. Nil means no limit. 0 disables the limit.
                         format: int32
                         maximum: 10000000
-                        minimum: 1
+                        minimum: 0
                         type: integer
                       name:
                         description: Name is the name of the Agent CRD to use

@@ -412,8 +412,8 @@ type StepAgentRef struct {
 	// MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
 	// When set, the evaluated additional prompt text is truncated to fit this budget, using a rough
 	// heuristic of approximately 3 runes per token (code/YAML tokenizes denser than prose, so this
-	// errs conservative). The agent's base prompt is not counted. Nil means no limit.
-	// +kubebuilder:validation:Minimum=1
+	// errs conservative). The agent's base prompt is not counted. Nil means no limit. 0 disables the limit.
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10000000
 	// +optional
 	MaxAdditionalPromptTokens *int32 `json:"maxAdditionalPromptTokens,omitempty"`
@@ -439,7 +439,8 @@ type StepAgentRef struct {
 	// steps that produced a response/output); steps with no steps-map entry are not counted and
 	// do not consume a slot in the window.
 	// Ignored for other modes. Defaults to 5 when omitted or zero.
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
 	// +optional
 	ContextBudgetLastN *int32 `json:"contextBudgetLastN,omitempty"`
 }

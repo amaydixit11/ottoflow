@@ -154,6 +154,47 @@ func TestApplyLastNBudget_PreservesNonStepKeys(t *testing.T) {
 	}
 }
 
+// TestApplyLastNBudget_MissingStepsKey covers the !ok branch: contextData has no "steps" key
+// at all (as opposed to an empty map), which must not panic and must not synthesize one.
+func TestApplyLastNBudget_MissingStepsKey(t *testing.T) {
+	ctx := map[string]interface{}{
+		"inputs":      map[string]interface{}{"k": "v"},
+		"variables":   map[string]interface{}{},
+		"expressions": map[string]interface{}{},
+		// no "steps" key
+	}
+	result := applyLastNBudget(ctx, 3, []string{"s1", "s2"})
+	if steps := stepsIn(result); len(steps) != 0 {
+		t.Errorf("missing steps key should yield no steps, got %d", len(steps))
+	}
+	if result["inputs"] == nil {
+		t.Error("inputs must be preserved")
+	}
+}
+
+// TestApplyLastNBudget_OnlyCountsStepsWithEntries verifies completionOrder is filtered to names
+// present in the steps map BEFORE taking the last N, so a completed step with no steps-map entry
+// (e.g. a conditional/no-output step) doesn't consume a slot in the lastN window.
+func TestApplyLastNBudget_OnlyCountsStepsWithEntries(t *testing.T) {
+	ctx := makeTestContext("s1", "s2", "s3")
+	// "gate" completed but never wrote a steps-map entry.
+	order := []string{"s1", "gate", "s2", "s3"}
+	result := applyLastNBudget(ctx, 2, order)
+	steps := stepsIn(result)
+	if len(steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d: %v", len(steps), steps)
+	}
+	if _, ok := steps["s2"]; !ok {
+		t.Error("expected s2 to be present")
+	}
+	if _, ok := steps["s3"]; !ok {
+		t.Error("expected s3 to be present")
+	}
+	if _, ok := steps["s1"]; ok {
+		t.Error("expected s1 to be pruned since gate (no entry) must not occupy a window slot")
+	}
+}
+
 func TestApplyLastNBudget_EmptyStepsMap(t *testing.T) {
 	ctx := map[string]interface{}{
 		"inputs":      map[string]interface{}{"k": "v"},

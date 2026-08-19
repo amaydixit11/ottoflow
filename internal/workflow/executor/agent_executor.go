@@ -123,6 +123,12 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 			// Evaluate each additional prompt with workflow context
 			evaluatedPrompt, err := e.celEvaluator.EvaluateExpression(ctx, additionalPromptTemplate, vars)
 			if err != nil {
+				if agentRef.ContextBudgetMode != "" && agentRef.ContextBudgetMode != "full" {
+					return nil, fmt.Errorf(
+						"failed to evaluate additional prompt: %w (step outputs may have been pruned by "+
+							"contextBudgetMode=%s; referenced steps must be within the last N completed steps)",
+						err, agentRef.ContextBudgetMode)
+				}
 				return nil, fmt.Errorf("failed to evaluate additional prompt: %w", err)
 			}
 			// Convert to string — use JSON for maps/slices so the LLM gets

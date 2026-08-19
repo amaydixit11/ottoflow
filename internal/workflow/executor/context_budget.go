@@ -31,27 +31,37 @@ func applyContextBudget(
 	}
 }
 
-// applyLastNBudget returns a copy of contextData where "steps" only contains entries
-// for the last n steps in completionOrder. inputs, variables, and expressions are preserved.
+// applyLastNBudget returns a copy of contextData where "steps" only contains entries for the
+// last n steps in completionOrder. N counts only completed steps that have an entry in the
+// steps map (e.g. agent steps that produced a response/output) — completionOrder is filtered
+// down to names present in the steps map BEFORE taking the last N, so steps that completed but
+// never wrote a steps-map entry don't consume a slot in the window.
+// inputs, variables, and expressions are preserved.
 func applyLastNBudget(contextData map[string]interface{}, n int, completionOrder []string) map[string]interface{} {
-	start := len(completionOrder) - n
-	if start < 0 {
-		start = 0
-	}
-	keepSet := make(map[string]bool, n)
-	for _, name := range completionOrder[start:] {
-		keepSet[name] = true
-	}
-
 	stepsMap, ok := contextData["steps"].(map[string]interface{})
 	if !ok || len(stepsMap) == 0 {
 		return copyContextWithSteps(contextData, stepsMap)
 	}
-	filteredSteps := make(map[string]interface{}, len(keepSet))
-	for name, data := range stepsMap {
-		if keepSet[name] {
-			filteredSteps[name] = data
+
+	present := make([]string, 0, len(completionOrder))
+	for _, name := range completionOrder {
+		if _, exists := stepsMap[name]; exists {
+			present = append(present, name)
 		}
+	}
+
+	start := len(present) - n
+	if start < 0 {
+		start = 0
+	}
+	keepSet := make(map[string]bool, n)
+	for _, name := range present[start:] {
+		keepSet[name] = true
+	}
+
+	filteredSteps := make(map[string]interface{}, len(keepSet))
+	for name := range keepSet {
+		filteredSteps[name] = stepsMap[name]
 	}
 	return copyContextWithSteps(contextData, filteredSteps)
 }

@@ -618,8 +618,8 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 				metrics.WorkflowStepDurationSeconds.WithLabelValues(workflowName, namespace, stepName).Observe(completionTime.Sub(stepStatus.StartTime.Time).Seconds())
 			}
 			e.invokeProgressCallback(workflowRun, workflow)
-			e.saveCheckpoint(ctx, workflowRun, stepName)
 			e.contextManager.RecordStepCompletion(stepName)
+			e.saveCheckpoint(ctx, workflowRun, stepName)
 		}
 
 		// If we didn't execute any steps in this iteration, break to avoid infinite loop

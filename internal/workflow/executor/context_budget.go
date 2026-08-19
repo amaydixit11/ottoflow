@@ -54,8 +54,9 @@ func applyLastNBudget(contextData map[string]interface{}, n int, completionOrder
 	if start < 0 {
 		start = 0
 	}
-	keepSet := make(map[string]bool, n)
-	for _, name := range present[start:] {
+	retained := present[start:]
+	keepSet := make(map[string]bool, len(retained))
+	for _, name := range retained {
 		keepSet[name] = true
 	}
 

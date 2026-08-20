@@ -143,6 +143,12 @@ lint: golangci-lint ## Run golangci-lint linter & yamllint
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
+##@ Demo
+
+.PHONY: demo
+demo: ## Regenerate the README demo GIF from images/demo.tape (requires vhs+ttyd+ffmpeg).
+	./hack/gen-demo-gif.sh
+
 ##@ Build
 
 .PHONY: build

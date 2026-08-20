@@ -1,0 +1,230 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-resource-analysis
+  namespace: ottoflow
+spec:
+  steps:
+    - name: getResources
+      message: "Collect pods and nodes"
+      expressions:
+        - name: namespaces
+          expression: 'resource.List("v1", "Namespace", "", {}).items'
+        - name: namespaceNames
+          expression: 'expressions.namespaces.map(ns, ns.metadata.name)'
+        - name: pods
+          expression: >-
+            expressions.namespaceNames.map(nsName, resource.List("v1", "Pod", nsName, {}).items).flatten()
+        - name: nodes
+          expression: 'resource.List("v1", "Node", "", {}).items'
+      outputs:
+        - name: pods
+          expression: 'expressions.pods'
+        - name: nodes
+          expression: 'expressions.nodes'
+    
+    - name: analyzePodResources
+      message: "Analyze pod resource requests, limits, and QoS classes"
+      dependsOn:
+        - getResources
+      expressions:
+        - name: podsWithContainers
+          expression: 'variables.pods.filter(p, has(p.spec.containers))'
+        - name: podsWithoutCPURequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers) && 
+              !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests) && has(c.resources.requests.cpu)))
+        - name: podsWithoutMemoryRequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers) && 
+              !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests) && has(c.resources.requests.memory)))
+        - name: podsWithoutAnyRequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers) && 
+              !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests)))
+        - name: totalCPURequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.cpu) ? 
+                string(c.resources.requests.cpu) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalMemoryRequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.memory) ? 
+                string(c.resources.requests.memory) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalCPULimits
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.limits) && has(c.resources.limits.cpu) ? 
+                string(c.resources.limits.cpu) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalMemoryLimits
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.limits) && has(c.resources.limits.memory) ? 
+                string(c.resources.limits.memory) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: guaranteedPods
+          expression: >-
+            expressions.podsWithContainers.filter(p, 
+              p.spec.containers.all(c, has(c.resources) && has(c.resources.requests) && 
+                has(c.resources.requests.cpu) && has(c.resources.requests.memory) && 
+                has(c.resources.limits) && has(c.resources.limits.cpu) && has(c.resources.limits.memory) && 
+                c.resources.requests.cpu == c.resources.limits.cpu && 
+                c.resources.requests.memory == c.resources.limits.memory)
+            )
+        - name: burstablePods
+          expression: >-
+            expressions.podsWithContainers.filter(p, 
+              !p.spec.containers.all(c, has(c.resources) && has(c.resources.requests) && 
+                has(c.resources.requests.cpu) && has(c.resources.requests.memory) && 
+                has(c.resources.limits) && has(c.resources.limits.cpu) && has(c.resources.limits.memory) && 
+                c.resources.requests.cpu == c.resources.limits.cpu && 
+                c.resources.requests.memory == c.resources.limits.memory) &&
+              p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))
+            )
+        - name: bestEffortPods
+          expression: >-
+            expressions.podsWithContainers.filter(p, 
+              !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))
+            )
+      outputs:
+        - name: report
+          value:
+            summary:
+              totalPods: size(variables.pods)
+              podsWithoutCPURequests: size(expressions.podsWithoutCPURequests)
+              podsWithoutMemoryRequests: size(expressions.podsWithoutMemoryRequests)
+              podsWithoutAnyRequests: size(expressions.podsWithoutAnyRequests)
+            podResourceUsage:
+              totalCPURequests: format("%.2f cores", expressions.totalCPURequests)
+              totalMemoryRequests: format("%.2f GB", expressions.totalMemoryRequests / 1073741824.0)
+              totalCPULimits: format("%.2f cores", expressions.totalCPULimits)
+              totalMemoryLimits: format("%.2f GB", expressions.totalMemoryLimits / 1073741824.0)
+            podsWithoutRequests: >-
+              expressions.podsWithoutAnyRequests.map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+            qosDistribution:
+              Guaranteed: size(expressions.guaranteedPods)
+              Burstable: size(expressions.burstablePods)
+              BestEffort: size(expressions.bestEffortPods)
+            guaranteedPods: >-
+              expressions.guaranteedPods.map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+            burstablePods: >-
+              expressions.burstablePods.map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+            bestEffortPods: >-
+              expressions.bestEffortPods.map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+    
+    - name: analyzeClusterResources
+      message: "Calculate total cluster CPU and memory from nodes"
+      dependsOn:
+        - getResources
+      expressions:
+        - name: totalNodeCPU
+          expression: >-
+            variables.nodes.filter(n, has(n.status.capacity) && has(n.status.capacity.cpu)).map(n, 
+              quantity(string(n.status.capacity.cpu)).asApproximateFloat()
+            ).sum()
+        - name: totalNodeMemory
+          expression: >-
+            variables.nodes.filter(n, has(n.status.capacity) && has(n.status.capacity.memory)).map(n, 
+              quantity(string(n.status.capacity.memory)).asApproximateFloat()
+            ).sum()
+        - name: allocatableCPU
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.cpu)).map(n, 
+              quantity(string(n.status.allocatable.cpu)).asApproximateFloat()
+            ).sum()
+        - name: allocatableMemory
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.memory)).map(n, 
+              quantity(string(n.status.allocatable.memory)).asApproximateFloat()
+            ).sum()
+      outputs:
+        - name: clusterResources
+          value:
+            totalNodes: size(variables.nodes)
+            totalCapacity:
+              cpu: format("%.2f cores", expressions.totalNodeCPU)
+              memory: format("%.2f GB", expressions.totalNodeMemory / 1073741824.0)
+            allocatable:
+              cpu: format("%.2f cores", expressions.allocatableCPU)
+              memory: format("%.2f GB", expressions.allocatableMemory / 1073741824.0)
+    
+    - name: generateReport
+      message: "Combine all analysis results and calculate utilization"
+      dependsOn:
+        - analyzePodResources
+        - analyzeClusterResources
+        - getResources
+      expressions:
+        - name: allocatableCPUFloat
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.cpu)).map(n, 
+              quantity(string(n.status.allocatable.cpu)).asApproximateFloat()
+            ).sum()
+        - name: allocatableMemoryGB
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.memory)).map(n, 
+              quantity(string(n.status.allocatable.memory)).asApproximateFloat()
+            ).sum() / 1073741824.0
+        - name: totalCPURequestsFloat
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.cpu) ? 
+                string(c.resources.requests.cpu) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalMemoryRequestsGB
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.memory) ? 
+                string(c.resources.requests.memory) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum() / 1073741824.0
+        - name: cpuUtilizationPercent
+          expression: >-
+            expressions.allocatableCPUFloat > 0 ? 
+            (expressions.totalCPURequestsFloat / expressions.allocatableCPUFloat) * 100.0 : 0.0
+        - name: memoryUtilizationPercent
+          expression: >-
+            expressions.allocatableMemoryGB > 0 ? 
+            (expressions.totalMemoryRequestsGB / expressions.allocatableMemoryGB) * 100.0 : 0.0
+        - name: podReport
+          expression: 'variables.report'
+        - name: clusterRes
+          expression: 'variables.clusterResources'
+        - name: cpuUtilizationStr
+          expression: 'format("%.1f%%", expressions.cpuUtilizationPercent)'
+        - name: memoryUtilizationStr
+          expression: 'format("%.1f%%", expressions.memoryUtilizationPercent)'
+      outputs:
+        - name: report
+          value:
+            clusterResources: expressions.clusterRes
+            podResourceUsage: expressions.podReport.podResourceUsage
+            podsWithoutRequests: expressions.podReport.podsWithoutRequests
+            qosDistribution: expressions.podReport.qosDistribution
+            summary: expressions.podReport.summary
+            utilization:
+              cpuUtilization: expressions.cpuUtilizationStr
+              memoryUtilization: expressions.memoryUtilizationStr
+            podsByQoS:
+              guaranteed: expressions.podReport.guaranteedPods
+              burstable: expressions.podReport.burstablePods
+              bestEffort: expressions.podReport.bestEffortPods
+  
+  outputs:
+    - name: report
+      expression: 'variables.report'

@@ -1,0 +1,77 @@
+# Hero example: Collect -> Analyze -> Publish.
+# Collect (resourceQuery, no LLM) gathers pod restart counts, Analyze (agentRef) sends
+# ONLY that summary to a local LLM, Publish is gated by matchConditions on what Collect found.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: pod-triage-agent
+  namespace: ottoflow
+spec:
+  prompt: |
+    You are an SRE triaging pod health. You receive ONLY a cluster snapshot summary
+    (counts and names) -- never raw pod specs. In one sentence, recommend the single
+    highest-priority next action.
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio).
+  # The server address comes from the LLAMACPP_HOST env var, not spec.config:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run pod-triage --model <your-model>
+  outputExtraction:
+    type: text
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-triage
+  namespace: ottoflow
+spec:
+  steps:
+    # 1. Collect: list pods and flag high restart counts in CEL. No LLM involved.
+    - name: collectPods
+      message: "Collect pods and flag high restart counts"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: '"default"'
+        outputs:
+          totalPods: size(items)
+          highRestartPods: items.filter(i, has(i.status.containerStatuses) &&
+            i.status.containerStatuses.exists(c, int(c.restartCount) > 3)).map(i, i.metadata.name)
+          highRestartCount: size(items.filter(i, has(i.status.containerStatuses) &&
+            i.status.containerStatuses.exists(c, int(c.restartCount) > 3)))
+
+    # 2. Analyze: hand the agent only the collected summary, never raw pod objects.
+    - name: triagePods
+      message: "Ask the agent to triage the flagged pods"
+      dependsOn:
+        - collectPods
+      agentRef:
+        name: pod-triage-agent
+        additionalPrompts:
+          - >-
+            format("Cluster snapshot -- total pods: %d, pods with restarts > 3: %d, names: %v.",
+              variables.totalPods, variables.highRestartCount, variables.highRestartPods)
+      outputs:
+        - name: verdict
+          expression: agentOutputs.result
+
+    # 3. Publish: only runs when Collect actually found pods to triage.
+    - name: publishTriage
+      message: "Publish the triage verdict"
+      dependsOn:
+        # Both are listed explicitly: this step reads variables.verdict from triagePods
+        # and variables.totalPods from collectPods. Relying on collectPods being ordered
+        # ahead transitively would work but leaves the real dependency undeclared.
+        - triagePods
+        - collectPods
+      matchConditions:
+        - name: pods-were-found
+          expression: variables.totalPods > 0
+      outputs:
+        - name: summary
+          expression: >-
+            format("%d pods scanned, %d flagged for high restarts. Verdict: %s",
+              variables.totalPods, variables.highRestartCount, variables.verdict)
+
+  outputs:
+    - name: triageSummary
+      expression: variables.summary

@@ -1,0 +1,31 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: test-image-metadata
+  namespace: ottoflow
+spec:
+  steps:
+    - name: testImageMetadata
+      message: "Test image.GetMetadata() function"
+      expressions:
+        - name: imageMeta
+          expression: 'image.GetMetadata("nginx:latest")'
+        - name: imageCreated
+          expression: 'image.GetMetadata("nginx:latest").config.created'
+        - name: imageArchitecture
+          expression: 'image.GetMetadata("nginx:latest").config.architecture'
+      outputs:
+        - name: metadata
+          expression: 'expressions.imageMeta'
+        - name: created
+          expression: 'expressions.imageCreated'
+        - name: architecture
+          expression: 'expressions.imageArchitecture'
+  
+  outputs:
+    - name: metadata
+      expression: 'variables.metadata'
+    - name: created
+      expression: 'variables.created'
+    - name: architecture
+      expression: 'variables.architecture'

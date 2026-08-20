@@ -1,0 +1,492 @@
+{{- if .Values.rbac.create }}
+---
+# Main aggregated ClusterRole - aggregates permissions from other ClusterRoles
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-role
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: rbac
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.ottoflow.io/aggregate-to-controller: "true"
+        rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+---
+# Core ClusterRole - OttoFlow-specific permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-role:core
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: rbac
+    rbac.ottoflow.io/aggregate-to-controller: "true"
+    rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+rules:
+  # OttoFlow CRDs - read-only for agents, mcpservers, steptemplates
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - agents
+      - mcpservers
+      - steptemplates
+    verbs:
+      - get
+      - list
+      - watch
+  # WorkflowRuns - controller and runner create/delete/update; scheduler and trigger create
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - workflowruns
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - workflowruns/finalizers
+      - workflowruns/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Workflows - read-only; status/finalizers for subresource updates
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - workflows
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - workflows/finalizers
+      - workflows/status
+    verbs:
+      - get
+      - patch
+      - update
+  # ConfigMaps - workflow execution context (runner)
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Secrets - cluster ref, agent auth, image pull (runner); internal cert (if used)
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # ServiceAccounts - bootstrap runner Job identity (create + get only)
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+  # Jobs - create, monitor, and delete runner Jobs (delete required for checkpoint retry)
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - watch
+  # ClusterRoleBindings - bind runner ServiceAccount to the runner ClusterRole (create, get, update).
+  # delete required so the controller can migrate a runner ClusterRoleBinding to a narrowed
+  # role — roleRef is immutable, so migration is delete-and-recreate.
+  # This grant is cluster-wide (not scoped to chart-managed bindings) because Kubernetes RBAC
+  # resourceNames cannot be combined with label selectors.
+  #
+  # Blast radius: this delete verb is cluster-wide, not limited to OttoFlow-managed bindings.
+  # A compromised controller could delete ANY ClusterRoleBinding in the cluster — an
+  # availability/lockout risk that did not exist before this grant. It is a temporary
+  # migration grant needed only because roleRef is immutable; removal is tracked in #153.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterrolebindings
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
+  # bind on the runner role so per-SA ClusterRoleBindings can reference it even when
+  # rbac.runnerClusterRole.extraResources grants verbs the controller itself lacks
+  # (K8s RBAC escalation-prevention requires bind OR holding every referenced permission).
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+    verbs:
+      - bind
+    resourceNames:
+      - {{ include "ottoflow.workflowRunnerClusterRole" . }}
+  # CustomResourceDefinitions - resource discovery for CEL and queries
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  # Events - workflow/step event reporting (create only)
+  - apiGroups:
+      - ""
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+  # OpenReports - runner creates and updates Report CRDs for openReport steps
+  - apiGroups:
+      - openreports.io
+    resources:
+      - reports
+    verbs:
+      - create
+      - get
+      - patch
+      - update
+  # ValidatingWebhookConfigurations - controller patches caBundle from internal cert manager
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+    verbs:
+      - get
+      - patch
+      - update
+{{- if and .Values.rbac.coreClusterRole .Values.rbac.coreClusterRole.extraResources }}
+  {{- toYaml .Values.rbac.coreClusterRole.extraResources | nindent 2 }}
+{{- end }}
+---
+# View ClusterRole - read permissions for standard Kubernetes resources
+# This provides view access to standard non-sensitive resources for workflow execution
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-role:view
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: rbac
+    rbac.ottoflow.io/aggregate-to-controller: "true"
+    rbac.ottoflow.io/aggregate-to-runner: "true"
+    rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+rules:
+  # Core API group - standard resources
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/status
+      - pods/log
+      - services
+      - services/status
+      - endpoints
+      - endpoints/status
+      - namespaces
+      - namespaces/status
+      - nodes
+      - persistentvolumes
+      - persistentvolumes/status
+      - persistentvolumeclaims
+      - persistentvolumeclaims/status
+      - serviceaccounts
+      - limitranges
+      - resourcequotas
+      - resourcequotas/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Apps API group
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - deployments/status
+      - deployments/scale
+      - replicasets
+      - replicasets/status
+      - replicasets/scale
+      - daemonsets
+      - daemonsets/status
+      - statefulsets
+      - statefulsets/status
+      - statefulsets/scale
+      - controllerrevisions
+    verbs:
+      - get
+      - list
+      - watch
+  # Batch API group
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+      - cronjobs/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Networking API group
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - ingresses/status
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+  # Storage API group
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+      - volumeattachments
+      - volumeattachments/status
+      - csinodes
+      - csidrivers
+      - csistoragecapacities
+    verbs:
+      - get
+      - list
+      - watch
+  # Policy API group
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+      - poddisruptionbudgets/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Autoscaling API group
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+      - horizontalpodautoscalers/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Coordination API group
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+  # Discovery API group
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  # Certificates API group
+  - apiGroups:
+      - certificates.k8s.io
+    resources:
+      - certificatesigningrequests
+      - certificatesigningrequests/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Events - read access for workflow steps using the resourceEvents() CEL function
+  - apiGroups:
+      - ""
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+  # Metrics API group - required for cost-analyzer and resource utilization workflows
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+{{- if and .Values.rbac.viewClusterRole .Values.rbac.viewClusterRole.extraResources }}
+  {{- toYaml .Values.rbac.viewClusterRole.extraResources | nindent 2 }}
+{{- end }}
+---
+# Runner ClusterRole - least-privilege permissions for workflow runner Job service accounts.
+# Runner reads of standard Kubernetes resources come from the aggregated -role:view above
+# (also labeled to aggregate here); this fragment adds only the write/execution-specific
+# permissions a runner Job actually needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-role:runner
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: runner-rbac
+    rbac.ottoflow.io/aggregate-to-runner: "true"
+    rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+rules:
+  # OttoFlow CRDs - read-only for agents, mcpservers, steptemplates, workflows, workflowruns
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - agents
+      - mcpservers
+      - steptemplates
+      - workflows
+      - workflowruns
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - workflowruns/status
+    verbs:
+      - get
+      - patch
+      - update
+  # ConfigMaps - workflow execution context
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Secrets - cluster ref, agent auth, image pull
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  # Jobs - ForEach and sub-step monitoring
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+  # OpenReports - runner creates and updates Report CRDs for openReport steps
+  - apiGroups:
+      - openreports.io
+    resources:
+      - reports
+    verbs:
+      - create
+      - get
+      - patch
+      - update
+  # CustomResourceDefinitions - resource discovery for CEL and queries
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  # Events - reserved for future runner event recording; recorder currently nil
+  - apiGroups:
+      - ""
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+{{- if and .Values.rbac.runnerClusterRole .Values.rbac.runnerClusterRole.extraResources }}
+  {{- toYaml .Values.rbac.runnerClusterRole.extraResources | nindent 2 }}
+{{- end }}
+---
+# Aggregated Runner ClusterRole - collects all ClusterRoles labeled to aggregate to the runner.
+# Workflow runner Job service accounts are bound to this role instead of the controller's own
+# role, so a compromised or malicious workflow cannot escalate to controller-level privileges
+# (ServiceAccount write, ClusterRoleBinding write, webhook config write, etc.).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-runner-role
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: runner-rbac
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.ottoflow.io/aggregate-to-runner: "true"
+        rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+rules: []
+---
+# Additional ClusterRole - for custom resources and additional permissions
+{{- if and .Values.rbac.clusterRole .Values.rbac.clusterRole.extraResources }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-role:additional
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: rbac
+    rbac.ottoflow.io/aggregate-to-controller: "true"
+    rbac.ottoflow.io/aggregate-instance: {{ include "ottoflow.fullname" . }}
+rules:
+  {{- toYaml .Values.rbac.clusterRole.extraResources | nindent 2 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,278 @@
+# Policy recommendations assessment only (no Agent step)
+# Use this to verify the assessment logic without LLM credentials
+# Run: ottoflow run policy-recommendations-assessment-only --workflow-dir samples/workflows
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: policy-recommendations-assessment-only
+  namespace: ottoflow
+  annotations:
+    description: "Same as policy-recommendations but stops at computeRecommendations (no Agent). Use for testing without LLM."
+spec:
+  steps:
+    - name: collectClusterData
+      message: "Collect cluster info"
+      expressions:
+        - name: namespaces
+          expression: 'dyn(resource.List("v1", "Namespace", "", {})).items'
+        - name: namespaceNames
+          expression: 'expressions.namespaces.map(ns, ns.metadata.name)'
+        - name: nodes
+          expression: 'dyn(resource.List("v1", "Node", "", {})).items'
+        - name: pods
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("v1", "Pod", nsName, {})).items).flatten()
+              : []
+        - name: deployments
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "Deployment", nsName, {})).items).flatten()
+              : []
+        - name: statefulsets
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "StatefulSet", nsName, {})).items).flatten()
+              : []
+        - name: daemonsets
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "DaemonSet", nsName, {})).items).flatten()
+              : []
+      outputs:
+        - name: namespaceNames
+          expression: 'expressions.namespaceNames'
+        - name: nodes
+          expression: 'expressions.nodes'
+        - name: pods
+          expression: 'expressions.pods'
+        - name: deployments
+          expression: 'expressions.deployments'
+
+    - name: collectRBAC
+      message: "Collect RBAC and wildcards"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: clusterRoles
+          expression: 'dyn(resource.List("rbac.authorization.k8s.io/v1", "ClusterRole", "", {})).items'
+        - name: wildcardClusterRoles
+          expression: >-
+            expressions.clusterRoles.filter(cr,
+              has(cr.rules) && cr.rules.exists(r,
+                (has(r.verbs) && r.verbs.exists(v, v == "*")) ||
+                (has(r.resources) && r.resources.exists(res, res == "*"))
+              )
+            )
+      outputs:
+        - name: wildcardClusterRoleCount
+          expression: 'size(expressions.wildcardClusterRoles)'
+
+    - name: computeSecurityMetrics
+      message: "Compute security metrics"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: privilegedPods
+          expression: >-
+            variables.pods.filter(p, has(p.spec) && has(p.spec.containers) && p.spec.containers.exists(cont, has(cont.securityContext) && "privileged" in cont.securityContext && cont.securityContext.privileged == true)).size()
+        - name: hostNetworkPods
+          expression: 'variables.pods.filter(p, has(p.spec) && "hostNetwork" in p.spec && p.spec.hostNetwork == true).size()'
+        - name: hostPathPods
+          expression: >-
+            variables.pods.filter(p, has(p.spec) && has(p.spec.volumes) && p.spec.volumes.exists(vol, has(vol.hostPath))).size()
+        - name: latestTagPods
+          expression: >-
+            variables.pods.filter(p, has(p.spec) && has(p.spec.containers) && p.spec.containers.exists(cont, has(cont.image) && cont.image.endsWith(":latest"))).size()
+        - name: noLimitsPods
+          expression: >-
+            variables.pods.filter(p, has(p.spec) && has(p.spec.containers) && p.spec.containers.exists(cont, !has(cont.resources) || !("limits" in cont.resources) || cont.resources.limits == null)).size()
+        - name: productionNamespaces
+          expression: >-
+            variables.namespaceNames.filter(ns, ns.contains("prod") || ns.contains("production")).size()
+      outputs:
+        - name: privilegedPods
+          expression: 'expressions.privilegedPods'
+        - name: hostNetworkPods
+          expression: 'expressions.hostNetworkPods'
+        - name: hostPathPods
+          expression: 'expressions.hostPathPods'
+        - name: latestTagPods
+          expression: 'expressions.latestTagPods'
+        - name: noLimitsPods
+          expression: 'expressions.noLimitsPods'
+        - name: productionNamespaces
+          expression: 'expressions.productionNamespaces'
+
+    - name: detectPlatform
+      message: "Detect platform"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: platformType
+          expression: >-
+            size(variables.nodes) == 0 ? "unknown"
+            : variables.nodes[0].spec.providerID.startsWith("aws://") ? "eks"
+            : variables.nodes[0].spec.providerID.startsWith("gce://") ? "gke"
+            : variables.nodes[0].spec.providerID.startsWith("azure://") ? "aks"
+            : variables.nodes[0].spec.providerID.contains("openshift") ? "openshift"
+            : "vanilla"
+      outputs:
+        - name: platformType
+          expression: 'expressions.platformType'
+
+    - name: detectAddons
+      message: "Detect add-ons"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: crds
+          expression: 'dyn(resource.List("apiextensions.k8s.io/v1", "CustomResourceDefinition", "", {})).items'
+        - name: crdNames
+          expression: 'expressions.crds.map(c, c.metadata.name)'
+        - name: addons
+          expression: >-
+            [
+              variables.namespaceNames.exists(n, n == "istio-system") && expressions.crdNames.exists(c, c.contains("istio.io")) ? "istio" : "",
+              variables.namespaceNames.exists(n, n == "linkerd") && expressions.crdNames.exists(c, c.contains("linkerd.io")) ? "linkerd" : "",
+              variables.namespaceNames.exists(n, n == "flux-system") && expressions.crdNames.exists(c, c.contains("fluxcd.io")) ? "flux" : "",
+              variables.namespaceNames.exists(n, n == "argocd") && expressions.crdNames.exists(c, c.contains("argoproj.io")) ? "argocd" : "",
+              variables.namespaceNames.exists(n, n == "tekton-pipelines") && expressions.crdNames.exists(c, c.contains("tekton.dev")) ? "tekton" : "",
+              expressions.crdNames.exists(c, c.contains("monitoring.coreos.com")) ? "prometheus" : ""
+            ].filter(a, a != "")
+      outputs:
+        - name: detectedAddons
+          expression: 'expressions.addons'
+        - name: crdNames
+          expression: 'expressions.crdNames'
+
+    - name: computeUnknownNamespaces
+      message: "Identify unknown namespaces"
+      dependsOn:
+        - collectClusterData
+        - detectAddons
+      expressions:
+        - name: knownPrefixes
+          expression: >-
+            ["kube-", "local-path", "kyverno", "istio", "linkerd", "flux", "argocd", "tekton", "cert-manager", "monitoring", "prometheus"]
+        - name: unknownNamespaces
+          expression: >-
+            variables.namespaceNames.filter(ns,
+              !expressions.knownPrefixes.exists(prefix, ns.startsWith(prefix)) && ns != "default"
+            )
+      outputs:
+        - name: unknownNamespaces
+          expression: 'expressions.unknownNamespaces'
+
+    - name: collectPolicies
+      message: "Collect Kyverno policies"
+      dependsOn:
+        - collectClusterData
+        - detectAddons
+      matchConditions:
+        - name: kyvernoInstalled
+          expression: 'variables.crdNames.exists(c, c.contains("clusterpolicies") && c.contains("kyverno"))'
+      expressions:
+        - name: clusterPolicies
+          expression: 'dyn(resource.List("kyverno.io/v1", "ClusterPolicy", "", {})).items'
+        - name: policies
+          expression: 'dyn(resource.List("kyverno.io/v1", "Policy", "", {})).items'
+        - name: verifyImagesPolicies
+          expression: >-
+            (expressions.clusterPolicies + expressions.policies).filter(p,
+              has(p.spec) && has(p.spec.rules) && p.spec.rules.exists(r, has(r.verifyImages))
+            )
+      outputs:
+        - name: clusterPolicyCount
+          expression: 'size(expressions.clusterPolicies)'
+        - name: policyCount
+          expression: 'size(expressions.policies)'
+        - name: verifyImagesCount
+          expression: 'size(expressions.verifyImagesPolicies)'
+
+    - name: ensurePolicyVars
+      message: "Set default policy counts when Kyverno not installed"
+      dependsOn:
+        - collectPolicies
+      expressions:
+        - name: cpolCount
+          expression: 'int(variables.?clusterPolicyCount.orValue(0))'
+        - name: polCount
+          expression: 'int(variables.?policyCount.orValue(0))'
+        - name: verifyCount
+          expression: 'int(variables.?verifyImagesCount.orValue(0))'
+      outputs:
+        - name: clusterPolicyCount
+          expression: 'string(expressions.cpolCount)'
+        - name: policyCount
+          expression: 'string(expressions.polCount)'
+        - name: verifyImagesCount
+          expression: 'string(expressions.verifyCount)'
+
+    - name: computeRecommendations
+      message: "Compute recommendations"
+      dependsOn:
+        - collectRBAC
+        - computeSecurityMetrics
+        - ensurePolicyVars
+        - detectPlatform
+        - detectAddons
+        - computeUnknownNamespaces
+        - collectPolicies
+        - collectClusterData
+      expressions:
+        - name: baselineRecs
+          expression: >-
+            ( (int(variables.clusterPolicyCount) == 0 && int(variables.policyCount) == 0) || int(variables.privilegedPods) > 0 || int(variables.hostNetworkPods) > 0
+              ? [{"policy": "pod-security-baseline", "priority": int(variables.clusterPolicyCount) == 0 ? "CRITICAL" : "HIGH", "reason": format("Pod security gaps: %d privileged, %d hostNetwork, %d hostPath", int(variables.privilegedPods), int(variables.hostNetworkPods), int(variables.hostPathPods)), "indicators": format("privileged=%d,hostnetwork=%d,hostpath=%d", int(variables.privilegedPods), int(variables.hostNetworkPods), int(variables.hostPathPods))}]
+              : [] )
+            + ( int(variables.wildcardClusterRoleCount) > 0
+              ? [{"policy": "rbac-best-practices", "priority": "HIGH", "reason": format("Wildcard RBAC detected: %d ClusterRoles", int(variables.wildcardClusterRoleCount)), "indicators": format("wildcard_roles=%d", int(variables.wildcardClusterRoleCount))}]
+              : [] )
+        - name: platformRec
+          expression: >-
+            variables.platformType == "eks" ? {"policy": "eks", "priority": "HIGH", "reason": "Amazon EKS detected"}
+            : variables.platformType == "openshift" ? {"policy": "openshift", "priority": "CRITICAL", "reason": "Red Hat OpenShift detected"}
+            : variables.platformType == "gke" ? {"policy": "gke", "priority": "MEDIUM", "reason": "Google GKE detected"}
+            : variables.platformType == "aks" ? {"policy": "aks", "priority": "MEDIUM", "reason": "Microsoft AKS detected"}
+            : {"policy": "vanilla", "priority": "INFO", "reason": "Vanilla Kubernetes"}
+        - name: assessmentSummaryPart1
+          expression: >-
+            format('{"clusterInfo":{"namespaceCount":%d,"nodeCount":%d,"podCount":%d,"deploymentCount":%d,"productionNamespaces":%d},"security":{"privilegedPods":%d,"hostNetworkPods":%d,"hostPathPods":%d,"latestTagPods":%d,"noLimitsPods":%d}',
+              size(variables.namespaceNames),
+              size(variables.nodes),
+              size(variables.pods),
+              size(variables.deployments),
+              int(variables.productionNamespaces),
+              int(variables.privilegedPods),
+              int(variables.hostNetworkPods),
+              int(variables.hostPathPods),
+              int(variables.latestTagPods),
+              int(variables.noLimitsPods)
+            )
+        - name: assessmentSummaryPart2
+          expression: >-
+            format(',"wildcardClusterRoles":%d},"policies":{"clusterPolicyCount":%d,"policyCount":%d,"verifyImagesCount":%d},"platform":"%s"}',
+              int(variables.wildcardClusterRoleCount),
+              int(variables.clusterPolicyCount),
+              int(variables.policyCount),
+              int(variables.verifyImagesCount),
+              string(variables.platformType)
+            )
+        - name: assessmentSummary
+          expression: 'expressions.assessmentSummaryPart1 + expressions.assessmentSummaryPart2'
+      outputs:
+        - name: baselineRecommendations
+          expression: 'expressions.baselineRecs'
+        - name: platformRecommendation
+          expression: 'expressions.platformRec'
+        - name: assessmentSummary
+          expression: 'expressions.assessmentSummary'
+
+  outputs:
+    - name: assessmentSummary
+      expression: 'variables.assessmentSummary'
+    - name: baselineRecommendations
+      expression: 'variables.baselineRecommendations'
+    - name: platformRecommendation
+      expression: 'variables.platformRecommendation'

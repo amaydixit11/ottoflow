@@ -1,0 +1,67 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-mcp-combined-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask the agent"
+      default: "What are the best practices for Kubernetes deployments?"
+    - name: deploymentName
+      description: "Deployment to check"
+      default: "nginx"
+  steps:
+    - name: askAgent
+      message: "Ask AI agent a question"
+      agentRef:
+        name: simple-agent
+        # Add additional prompt with the actual question
+        additionalPrompts:
+          - 'format("Answer the following question:\n\n%s\n\nProvide a clear, concise answer.", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+    
+    - name: getDeploymentInfo
+      message: "Get deployment information using MCP tool"
+      mcpToolCall:
+        server: kubernetes-mcp
+        tool: get-resource
+        arguments:
+          resourceType: '"Deployment"'
+          namespace: '"ottoflow"'
+          name: 'inputs.deploymentName'
+      outputs:
+        - name: deploymentInfo
+          expression: 'toolResult'
+    
+    - name: analyzeWithContext
+      message: "Use agent to analyze deployment with context"
+      dependsOn:
+        - askAgent
+        - getDeploymentInfo
+      agentRef:
+        name: analysis-agent
+        additionalPrompts:
+          - >-
+            format("Based on the following deployment information: %v\n\nAnd considering this context:\n%s\n\nProvide specific recommendations for this deployment.",
+              variables.deploymentInfo,
+              variables.answer)
+      outputs:
+        - name: recommendations
+          expression: 'agentOutputs.recommendations'
+        - name: analysis
+          expression: 'agentResponse'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-mcp-combined-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-mcp-combined-workflow
+  inputValues:
+    question: "What are Kubernetes best practices?"
+    deploymentName: "nginx"

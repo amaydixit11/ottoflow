@@ -1,0 +1,110 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: steptemplate-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to analyze"
+      default: "nginx-6b7f675bdc-example"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    # Use StepTemplate to collect pod information
+    - name: collectPodInfo
+      stepTemplateRef:
+        name: collect-pod-info
+        namespace: ottoflow
+        arguments:
+          namespace: 'inputs.namespace'
+          podName: 'inputs.podName'
+    
+    # Use StepTemplate to get pod metrics
+    - name: getPodMetrics
+      stepTemplateRef:
+        name: get-pod-metrics
+        namespace: ottoflow
+        arguments:
+          namespace: 'inputs.namespace'
+          podName: 'inputs.podName'
+      dependsOn:
+        - collectPodInfo
+    
+    # Use StepTemplate to get pod events
+    - name: getPodEvents
+      stepTemplateRef:
+        name: get-pod-events
+        namespace: ottoflow
+        arguments:
+          namespace: 'inputs.namespace'
+          podName: 'inputs.podName'
+      dependsOn:
+        - collectPodInfo
+    
+    # Use StepTemplate to list pods with filter
+    - name: listPods
+      stepTemplateRef:
+        name: list-pods-with-filter
+        namespace: ottoflow
+        arguments:
+          namespace: 'inputs.namespace'
+          appLabel: '"nginx"'
+          phaseFilter: '"Running"'
+      dependsOn:
+        - collectPodInfo
+    
+    # Generate summary using collected data
+    - name: generateSummary
+      message: "Generate diagnostic summary"
+      dependsOn:
+        - collectPodInfo
+        - getPodMetrics
+        - getPodEvents
+        - listPods
+      expressions:
+        - name: summary
+          expression: >-
+            format(
+              "Pod %s Analysis:\n" +
+              "  Phase: %s\n" +
+              "  Restart Count: %d\n" +
+              "  Total CPU: %s\n" +
+              "  Total Memory: %s\n" +
+              "  Events: %d (Errors: %d)\n" +
+              "  Total Pods in Namespace: %d",
+              inputs.podName,
+              variables.phase,
+              int(variables.restartCount),
+              string(variables.totalCPU),
+              string(variables.totalMemory),
+              int(variables.eventCount),
+              int(variables.errorCount),
+              int(variables.podCount)
+            )
+      outputs:
+        - name: summary
+          expression: 'expressions.summary'
+  
+  outputs:
+    - name: podPhase
+      expression: 'variables.phase'
+    - name: restartCount
+      expression: 'variables.restartCount'
+    - name: summary
+      expression: 'variables.summary'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: steptemplate-example-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: steptemplate-example
+    namespace: ottoflow
+  inputValues:
+    podName: "nginx-6b7f675bdc-example"
+    namespace: "ottoflow"

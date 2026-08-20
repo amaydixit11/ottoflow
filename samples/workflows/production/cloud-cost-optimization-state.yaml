@@ -1,0 +1,10 @@
+# Persists state across runs for trend analysis (compare with previous run).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-cost-optimization-state
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: ottoflow
+    ottoflow.nirmata.io/workflow: cloud-cost-daily
+data: {}

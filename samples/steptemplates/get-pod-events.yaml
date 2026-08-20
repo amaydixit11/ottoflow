@@ -1,0 +1,34 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: get-pod-events
+  namespace: ottoflow
+spec:
+  description: "Gets Kubernetes events for a pod"
+  parameters:
+    - name: namespace
+      description: "Pod namespace"
+      required: true
+    - name: podName
+      description: "Pod name"
+      required: true
+  step:
+    message: "Get events for pod {{.podName}}"
+    expressions:
+      - name: events
+        expression: 'resourceEvents("v1", "Pod", "{{.namespace}}", "{{.podName}}")'
+      - name: errorEvents
+        expression: 'expressions.events.filter(e, e.type == "Warning")'
+      - name: eventCount
+        expression: 'size(expressions.events)'
+      - name: errorCount
+        expression: 'size(expressions.errorEvents)'
+    outputs:
+      - name: events
+        expression: 'expressions.events'
+      - name: errorEvents
+        expression: 'expressions.errorEvents'
+      - name: eventCount
+        expression: 'expressions.eventCount'
+      - name: errorCount
+        expression: 'expressions.errorCount'

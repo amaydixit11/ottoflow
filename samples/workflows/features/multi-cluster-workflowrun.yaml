@@ -1,0 +1,31 @@
+# Example WorkflowRun that runs against a cluster specified by a KubeConfig secret.
+# OttoFlow will execute this run in a dedicated runner Job and resolve the Secret
+# reference there before building the target-cluster client.
+# Create a Secret containing a kubeconfig file (e.g. key "config" or "kubeconfig")
+# in the same namespace, then reference it in spec.clusterRef.kubeConfigSecretRef.
+#
+# To run against the local (Hub) cluster explicitly:
+#   spec:
+#     clusterRef:
+#       local: true
+#
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-query-remote-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-query-example
+    namespace: ottoflow
+  # Run this workflow against the cluster defined in the referenced Secret.
+  # The Secret must contain a kubeconfig file (e.g. under key "config", "kubeconfig", or "value").
+  clusterRef:
+    kubeConfigSecretRef:
+      name: my-remote-cluster-kubeconfig
+      # namespace: ottoflow  # optional; defaults to WorkflowRun namespace
+      # key: config          # optional; tries "config", "kubeconfig", "value" if empty
+  inputValues:
+    podName: "nginx"
+    namespace: "ottoflow"
+    appName: "my-app"

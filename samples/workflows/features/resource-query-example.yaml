@@ -1,0 +1,71 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: resource-query-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to query"
+      default: "test-pod"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+    - name: appName
+      description: "App name for the label selector"
+      default: "nginx"
+  
+  steps:
+    # Single resource query example
+    - name: getPodInfo
+      message: "Get pod information using resourceQuery"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        name: 'inputs.podName'
+        outputs:
+          phase: object.status.phase
+          ready: object.status.conditions.filter(c, c.type == "Ready")[0].status == "True"
+          restartCount: object.status.containerStatuses.map(c, int(c.restartCount)).sum()
+          images: object.spec.containers.map(c, c.image)
+    
+    # List query example with label selector
+    - name: listPods
+      message: "List pods using resourceQuery with label selector"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        # labelSelector values are CEL expressions, so a literal label value must be
+        # quoted inside the expression (app: '"nginx"'). Here it comes from an input.
+        labelSelector:
+          app: 'inputs.appName'
+        outputs:
+          labelledCount: size(items)
+          labelledNames: items.map(i, i.metadata.name)
+          labelledRunningCount: size(items.filter(i, i.status.phase == "Running"))
+    
+    # List query with field selector
+    - name: listRunningPods
+      message: "List running pods using field selector"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        # fieldSelector is evaluated as CEL and must yield a selector string, so the
+        # literal selector needs to be quoted inside the expression.
+        fieldSelector: '"status.phase=Running"'
+        outputs:
+          runningCount: size(items)
+          runningNames: items.map(i, i.metadata.name)
+
+  # Each step writes distinctly named outputs. Two steps writing the same name would leave
+  # the workflow output dependent on which finished last.
+  outputs:
+    - name: podPhase
+      expression: 'variables.phase'
+    - name: labelledPodCount
+      expression: 'variables.labelledCount'
+    - name: runningPodCount
+      expression: 'variables.runningCount'

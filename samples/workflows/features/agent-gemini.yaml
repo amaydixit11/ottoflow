@@ -1,0 +1,73 @@
+# Agent step using the Google Gemini provider.
+#
+# Credential mechanism (verified against source, not assumed):
+#   - modelProvider accepts both "google" and "gemini" as aliases for the
+#     same gollm Gemini provider (internal/agent: providerGoogle,
+#     providerGemini both map to the same handling).
+#   - gollm's Gemini provider reads its API key from the GEMINI_API_KEY
+#     process environment variable INSIDE the agent-executor pod, via
+#     os.Getenv. It is NOT read from Agent.spec.config, and WorkflowRun
+#     credentials never reach this pod — see README.md, "LLM providers and
+#     credentials", for why.
+#   - Set GEMINI_API_KEY on the agent-executor pod via the Helm chart's
+#     `agentExecutor.env`
+#     (charts/ottoflow/templates/agent-executor-deployment.yaml), which
+#     supports secretKeyRef.
+#   - NOTE: Agent.spec.config.skipVerifySSL is IGNORED by the gemini
+#     provider (honored only by openai/anthropic/azure-openai/local).
+#
+# One-time setup:
+#   kubectl create secret generic llm-credentials \
+#     --namespace ottoflow \
+#     --from-literal=gemini-api-key='...'
+#
+#   helm upgrade --install ottoflow charts/ottoflow \
+#     --namespace ottoflow \
+#     --set-json 'agentExecutor.env=[{"name":"GEMINI_API_KEY","valueFrom":{"secretKeyRef":{"name":"llm-credentials","key":"gemini-api-key"}}}]'
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-gemini-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (Gemini provider)"
+      agentRef:
+        name: gemini-agent
+        additionalPrompts:
+          - 'format("Question: %s", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Step outputs land in the shared `variables` map, hence variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-gemini-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-gemini-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: gemini-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: google  # "gemini" is an accepted alias for the same provider
+  modelName: gemini-2.0-flash
+  outputExtraction:
+    type: text

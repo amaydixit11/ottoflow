@@ -1,0 +1,93 @@
+---
+# Workload troubleshooter: diagnoses a failing pod by collecting events and logs,
+# then asking an LLM agent to identify the root cause.
+#
+# Usage:
+#   ottoflow run workload-troubleshooter --input podName=my-pod --input namespace=default --input container=app
+#
+# NOTE: resource.GetLogs requires a typed Kubernetes clientset, which only the
+# in-cluster workflow-runner wires up (cmd/workflow-runner/main.go). CLI local
+# mode (`ottoflow run --workflow-dir ...`) passes nil
+# (cli/internal/executor/local_executor.go), so collectLogs fails there —
+# apply this workflow to a cluster with the controller installed instead.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: workload-troubleshooter
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: Name of the pod to diagnose
+    - name: namespace
+      default: default
+      description: Namespace where the pod lives
+    - name: container
+      default: ""
+      description: Container name (empty = pod default container)
+
+  steps:
+    - name: collectEvents
+      message: "Collect recent events for the pod"
+      expressions:
+        - name: events
+          expression: 'resourceEvents("v1", "Pod", inputs.namespace, inputs.podName)'
+      outputs:
+        - name: events
+          expression: 'expressions.events'
+
+    - name: collectLogs
+      message: "Collect recent container logs for the pod"
+      dependsOn: [collectEvents]
+      expressions:
+        - name: logs
+          # Fetch the last 200 lines of the container log.
+          # Returns "" when the pod has no logs yet (e.g. ImagePullBackOff, CrashLoopBackOff before first line).
+          # Returns a CEL error when the pod does not exist.
+          expression: 'resource.GetLogs(inputs.namespace, inputs.podName, inputs.container, 200)'
+      outputs:
+        - name: logs
+          expression: 'expressions.logs'
+
+    - name: diagnose
+      message: "Ask the AI agent to diagnose the root cause"
+      # References variables.events and variables.logs — both producers must be
+      # listed explicitly (dependencies are never inferred transitively).
+      dependsOn: [collectEvents, collectLogs]
+      agentRef:
+        name: default-agent
+        namespace: ottoflow
+        additionalPrompts:
+          - >-
+            format("Pod: %s/%s\n\nRecent events:\n%s\n\nContainer logs (last 200 lines):\n%s\n\nIdentify the most likely root cause and provide a concise remediation recommendation.\nFormat your response as:\n- Root cause: <one sentence>\n- Remediation: <bullet points>",
+              inputs.namespace,
+              inputs.podName,
+              variables.events,
+              variables.logs)
+      outputs:
+        - name: diagnosis
+          expression: 'agentResponse'
+
+  outputs:
+    - name: diagnosis
+      expression: 'variables.diagnosis'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: default-agent
+  namespace: ottoflow
+spec:
+  prompt: |
+    You are a Kubernetes SRE diagnosing a failing workload. You will be given
+    recent events and container logs for a pod. Identify the most likely root
+    cause and provide a concise, actionable remediation recommendation.
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  outputExtraction:
+    type: text

@@ -1,0 +1,18 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-webhook
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: webhook
+spec:
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "ottoflow.selectorLabels.n6" . }}
+{{- end }}

@@ -1,0 +1,39 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: expressions-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: deploymentName
+      description: "Deployment to check"
+      default: "nginx"
+  
+  steps:
+    - name: checkDeployment
+      message: "Check deployment status"
+      expressions:
+        - name: deployment
+          expression: 'resource.Get("apps/v1", "Deployment", "default", inputs.deploymentName)'
+        - name: deploymentExists
+          expression: 'expressions.deployment != null'
+        - name: replicas
+          # resource.Get returns null when the resource is absent, so guard the field access
+          # with the existence check computed above.
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.replicas : 0'
+      outputs:
+        - name: deploymentExists
+          expression: 'expressions.deploymentExists'
+        - name: replicaCount
+          expression: 'expressions.replicas'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: expressions-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: expressions-workflow
+  inputValues:
+    deploymentName: "good-deployment-with-labels"

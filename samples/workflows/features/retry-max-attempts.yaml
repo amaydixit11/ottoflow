@@ -1,0 +1,42 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: retry-max-attempts
+  namespace: ottoflow
+spec:
+  steps:
+    - name: stepThatAlwaysFails
+      message: "Step that will fail after max attempts"
+      # failurePolicy applies to the step it is declared on, so it belongs here -- on the
+      # step that fails -- not on the one that should run afterwards.
+      failurePolicy: Continue
+      retry:
+        attempts: 2
+        backoff:
+          strategy: exponential
+          initialInterval: "1s"
+      expressions:
+        # This will always fail - resource doesn't exist
+        - name: always-fails
+          expression: 'resource.Get("v1", "configmaps", "default", "never-exists-resource").metadata.name'
+      outputs:
+        - name: result
+          expression: '"This will never succeed"'
+    - name: continueAfterFailure
+      message: "This step should execute even if previous step fails"
+      outputs:
+        - name: message
+          expression: '"Workflow continued despite failure"'
+  outputs:
+    - name: status
+      expression: 'variables.message'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: retry-max-attempts-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: retry-max-attempts
+    namespace: ottoflow

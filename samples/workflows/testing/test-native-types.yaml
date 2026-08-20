@@ -1,0 +1,48 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: test-native-types
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: jsonData
+      description: JSON string to parse
+      default: '{"name": "test", "value": 42}'
+    - name: yamlData
+      description: YAML string to parse
+      default: "key: value\nitems:\n  - a\n  - b"
+    - name: apiUrl
+      description: API URL to test
+      default: "https://httpbin.org/json"
+
+  steps:
+    # Test JSON library
+    - name: testJson
+      expressions:
+        - name: parsed
+          expression: 'json.unmarshal(inputs.jsonData)'
+        - name: nameValue
+          expression: 'json.unmarshal(inputs.jsonData).name'
+      outputs:
+        - name: name
+          expression: 'expressions.nameValue'
+
+    # Test YAML library
+    - name: testYaml
+      expressions:
+        - name: parsed
+          expression: 'yaml.parse(inputs.yamlData)'
+        - name: keyValue
+          expression: 'yaml.parse(inputs.yamlData).key'
+      outputs:
+        - name: key
+          expression: 'expressions.keyValue'
+
+    # Test HTTP library
+    - name: testHttp
+      expressions:
+        - name: response
+          expression: 'http.Get(inputs.apiUrl)'
+      outputs:
+        - name: response
+          expression: 'expressions.response'

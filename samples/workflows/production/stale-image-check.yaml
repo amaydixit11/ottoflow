@@ -1,0 +1,131 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: stale-image-check
+  namespace: ottoflow
+  annotations:
+    description: "Find pods with container images older than a specified threshold"
+spec:
+  inputs:
+    - name: thresholdDays
+      description: "Image age threshold in days (default: 180 days = 6 months)"
+      default: "1"
+    - name: namespace
+      description: "Optional namespace to filter pods. If not provided, queries all namespaces."
+  steps:
+    - name: getAllPods
+      message: "Get all pods"
+      expressions:
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", inputs.?namespace.orValue(""), {})).items'
+      outputs:
+        - name: allPods
+          expression: 'expressions.allPods'
+    
+    - name: extractUniqueImages
+      message: "Extract unique images from all pods"
+      dependsOn:
+        - getAllPods
+      expressions:
+        - name: podsWithImages
+          expression: >-
+            variables.allPods.filter(p, 
+              size(p.?spec.containers.orValue([])) > 0
+            )
+        - name: uniqueImages
+          expression: >-
+            expressions.podsWithImages
+              .map(p, p.spec.containers.map(c, c.image))
+              .flatten()
+              .distinct()
+      outputs:
+        - name: uniqueImages
+          expression: 'expressions.uniqueImages'
+        - name: podsWithImages
+          expression: 'expressions.podsWithImages'
+    
+    - name: checkImageAge
+      message: "Check image ages in parallel"
+      dependsOn:
+        - extractUniqueImages
+      forEach:
+        items: 'variables.uniqueImages'
+        itemVariable: "image"
+        stepTemplateRef:
+          name: get-image-metadata
+          namespace: ottoflow
+          arguments:
+            image: 'variables.image'
+        maxConcurrency: 10
+        itemFailurePolicy: Continue
+      outputs:
+        - name: totalChecked
+          expression: 'size(steps.checkImageAge.results)'
+        - name: error
+          expression: 'size(steps.checkImageAge.failed)'
+    
+    - name: generateReport
+      message: "Generate stale image report"
+      dependsOn:
+        - checkImageAge
+        - extractUniqueImages
+        - getAllPods
+      expressions:
+        - name: currentTime
+          expression: 'time.now()'
+        - name: allImageDetails
+          expression: >-
+            steps.checkImageAge.succeeded
+              .filter(r, r.outputs.imageTimestamp != null)
+              .map(r, {
+                "image": r.item,
+                "created": r.outputs.imageCreated,
+                "ageDays": dyn((expressions.currentTime - r.outputs.imageTimestamp).getHours() / 24),
+                "architecture": r.outputs.architecture,
+                "os": r.outputs.os
+              })
+        - name: staleImages
+          expression: >-
+            expressions.allImageDetails
+              .filter(img, img.ageDays > int(inputs.thresholdDays))
+              .map(img, {
+                "image": img.image,
+                "created": img.created,
+                "ageDays": img.ageDays,
+                "isStale": dyn(true),
+                "architecture": img.architecture,
+                "os": img.os,
+                "pods": dyn(
+                  variables.podsWithImages
+                    .filter(p, p.spec.containers.exists(c, c.image == img.image))
+                    .map(p, p.metadata.namespace + "/" + p.metadata.name)
+                )
+              })
+        - name: failedImages
+          expression: >-
+            steps.checkImageAge.failed
+              .map(r, {
+                "image": r.item,
+                "error": r.error
+              })
+      outputs:
+        - name: report
+          value:
+            totalPods: size(variables.allPods)
+            podsWithContainers: size(variables.podsWithImages)
+            uniqueImageCount: size(variables.uniqueImages)
+            thresholdDays: inputs.thresholdDays
+            currentTime: string(expressions.currentTime)
+            totalChecked: variables.totalChecked
+            error: variables.error
+            staleImageCount: size(expressions.staleImages)
+            staleImages: expressions.staleImages
+            failedImages: expressions.failedImages
+            note: >-
+              Stale images are those older than the threshold (thresholdDays).
+              Age is calculated as the difference between current time and image creation timestamp.
+              Duration is provided in ageDays field.
+  
+  outputs:
+    - name: report
+      expression: 'variables.report'

@@ -1,0 +1,96 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: complex-workflow-with-retry
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: appName
+      description: "Application name"
+      default: "my-app"
+    - name: environment
+      description: "Environment (dev, staging, prod)"
+      default: "dev"
+  steps:
+    - name: validateInputs
+      message: "Validate workflow inputs"
+      outputs:
+        - name: valid
+          expression: 'inputs.appName != "" && inputs.environment != ""'
+        - name: envType
+          expression: 'inputs.environment'
+    
+    - name: getDeployment
+      message: "Get deployment information with retry"
+      dependsOn:
+        - validateInputs
+      expressions:
+        - name: deployment
+          expression: 'resource.Get("apps/v1", "Deployment", "default", inputs.appName)'
+        - name: deploymentExists
+          expression: 'expressions.deployment != null'
+        - name: replicas
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.replicas : 0'
+      retry:
+        attempts: 3
+        backoff:
+          strategy: exponential
+          initialInterval: "2s"
+        retryOn:
+          - errorMessage: ".*not found.*"
+      outputs:
+        - name: replicaCount
+          expression: 'expressions.replicas'
+        - name: found
+          expression: 'expressions.deploymentExists'
+    
+    - name: scaleDeployment
+      message: "Scale deployment based on environment"
+      dependsOn:
+        - getDeployment
+      matchConditions:
+        - name: deploymentExists
+          expression: 'variables.found == true'
+      retry:
+        attempts: 2
+        backoff:
+          strategy: linear
+          initialInterval: "3s"
+      expressions:
+        - name: targetReplicas
+          expression: 'inputs.environment == "prod" ? 5 : 2'
+      outputs:
+        - name: scaledTo
+          expression: 'expressions.targetReplicas'
+    
+    - name: verifyScaling
+      message: "Verify deployment scaling"
+      dependsOn:
+        - scaleDeployment
+      matchConditions:
+        - name: scalingPerformed
+          # scaleDeployment is itself conditional, so when it is skipped its outputs are
+          # never written. Referencing variables.scaledTo directly raises "no such key"
+          # rather than evaluating false, so test for presence first.
+          expression: 'has(variables.scaledTo) && variables.scaledTo > 0'
+      outputs:
+        - name: verified
+          expression: '"Scaling verified"'
+  outputs:
+    - name: summary
+      expression: '"Workflow completed for " + inputs.appName + " in " + inputs.environment'
+    - name: finalReplicas
+      expression: 'variables.scaledTo'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: complex-workflow-with-retry-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: complex-workflow-with-retry
+    namespace: ottoflow
+  inputValues:
+    appName: "good-deployment-with-labels"
+    environment: "dev"

@@ -1,0 +1,13 @@
+# Configuration for elastic/crd-ref-docs (see https://github.com/elastic/crd-ref-docs)
+processor:
+  # Types to exclude from generated documentation (RE2 patterns).
+  ignoreTypes:
+    - "List$"
+  # Fields to exclude from generated documentation (RE2 patterns).
+  ignoreFields:
+    - "TypeMeta$"
+    - "ObjectMeta$"
+
+render:
+  # Kubernetes version for links to Kubernetes API documentation.
+  kubernetesVersion: "1.29"

@@ -1,0 +1,70 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: complex-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: appName
+      description: "Application name"
+      required: true
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    - name: getDeployment
+      message: "Get deployment information"
+      expressions:
+        - name: deployment
+          expression: 'resource.Get("apps/v1", "Deployment", inputs.namespace, inputs.appName)'
+        # resource.Get returns null when the resource is absent, so every field access
+        # below is guarded by this check rather than assuming the deployment is there.
+        - name: deploymentExists
+          expression: 'expressions.deployment != null'
+        - name: replicas
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.replicas : 0'
+        - name: image
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.template.spec.containers[0].image : ""'
+      outputs:
+        - name: replicaCount
+          expression: 'expressions.replicas'
+        - name: containerImage
+          expression: 'expressions.image'
+    
+    - name: listServices
+      message: "List services in namespace"
+      expressions:
+        - name: serviceList
+          expression: 'resource.List("v1", "Service", inputs.namespace, {}).items'
+        - name: serviceCount
+          expression: 'size(expressions.serviceList)'
+      outputs:
+        - name: count
+          expression: 'expressions.serviceCount'
+    
+    - name: aggregateResults
+      message: "Combine results from previous steps"
+      dependsOn:
+        - getDeployment
+        - listServices
+      expressions:
+        - name: totalResources
+          expression: 'double(variables.replicaCount) + double(variables.count)'
+      outputs:
+        - name: total
+          expression: 'expressions.totalResources'
+        # Note: String conversion from double is not directly supported in CEL
+        # Summary output removed due to CEL limitation with string(double) conversion
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: complex-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: complex-workflow
+  inputValues:
+    appName: "good-deployment-with-labels"
+    namespace: "ottoflow"

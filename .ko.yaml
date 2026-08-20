@@ -1,0 +1,6 @@
+# ko configuration file
+# See https://github.com/google/ko for more information
+
+defaultLdflags:
+  - -s -w
+  - -X main.version={{.Git.Tag}}

@@ -1,0 +1,42 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-restart-analysis
+  namespace: ottoflow
+spec:
+  steps:
+    - name: getPods
+      message: "Get all pods across all namespaces"
+      expressions:
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", "", {})).items'
+      outputs:
+        - name: allPods
+          expression: 'expressions.allPods'
+    
+    - name: analyzeRestarts
+      message: "Analyze pods and find those with restarts"
+      dependsOn:
+        - getPods
+      expressions:
+        - name: podsWithRestarts
+          expression: >-
+            variables.allPods.filter(p, 
+              p.status.containerStatuses.map(c, int(c.restartCount)).sum() > 0
+            )
+        - name: totalRestarts
+          expression: >-
+            variables.allPods.map(p, 
+              p.status.containerStatuses.map(c, int(c.restartCount)).sum()
+            ).sum()
+      outputs:
+        - name: report
+          value:
+            totalPods: size(variables.allPods)
+            podsWithRestarts: size(expressions.podsWithRestarts)
+            totalRestarts: expressions.totalRestarts
+            pods: expressions.podsWithRestarts
+  
+  outputs:
+    - name: report
+      expression: 'variables.report'

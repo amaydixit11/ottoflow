@@ -1,0 +1,29 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: list-pods-with-filter
+  namespace: ottoflow
+spec:
+  description: "Lists pods with optional label and phase filtering"
+  parameters:
+    - name: namespace
+      description: "Namespace to list pods from"
+      default: '"default"'
+    - name: appLabel
+      description: "App label value for filtering (empty = no filter)"
+      default: '""'
+    - name: phaseFilter
+      description: "Filter by phase (empty string = all phases)"
+      default: '""'
+  step:
+    message: "List pods in namespace {{.namespace}}"
+    resourceQuery:
+      apiVersion: v1
+      resource: Pod
+      namespace: '"{{.namespace}}"'
+      outputs:
+        podCount: size(items)
+        podNames: items.map(i, i.metadata.name)
+        runningPods: items.filter(i, i.status.phase == "Running").map(i, i.metadata.name)
+        filteredPods: '"{{.phaseFilter}}" != "" ? items.filter(i, i.status.phase == "{{.phaseFilter}}").map(i, i.metadata.name) : items.map(i, i.metadata.name)'
+        appPods: '"{{.appLabel}}" != "" ? items.filter(i, has(i.metadata.labels) && has(i.metadata.labels.app) && i.metadata.labels.app == "{{.appLabel}}").map(i, i.metadata.name) : items.map(i, i.metadata.name)'

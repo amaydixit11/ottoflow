@@ -1,0 +1,101 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-diagnostics-with-mcp-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to diagnose"
+      required: true
+    - name: namespace
+      description: "Namespace of the pod"
+      default: "default"
+  
+  steps:
+    - name: getPodBasicInfo
+      message: "Get basic pod information using CEL"
+      expressions:
+        - name: pod
+          expression: 'resource.Get("v1", "Pod", inputs.namespace, inputs.podName)'
+        - name: podPhase
+          expression: 'expressions.pod.status.phase'
+        - name: podReady
+          expression: 'has(expressions.pod.status.conditions) && expressions.pod.status.conditions.exists(c, c.type == "Ready" && c.status == "True")'
+        - name: restartCount
+          expression: 'has(expressions.pod.status.containerStatuses) ? expressions.pod.status.containerStatuses.map(c, int(c.restartCount)).sum() : int(0)'
+        - name: firstContainer
+          expression: 'has(expressions.pod.spec.containers) && size(expressions.pod.spec.containers) > 0 ? expressions.pod.spec.containers[0].name : ""'
+      outputs:
+        - name: podBasicInfo
+          value:
+            phase: expressions.podPhase
+            ready: expressions.podReady
+            restartCount: expressions.restartCount
+            firstContainer: expressions.firstContainer
+    
+    - name: getPodLogs
+      message: "Get pod logs using resourceLogs macro"
+      dependsOn:
+        - getPodBasicInfo
+      expressions:
+        - name: logs
+          expression: >-
+            has(variables.podBasicInfo.firstContainer) && variables.podBasicInfo.firstContainer != "" ? 
+              resourceLogs("v1", "Pod", inputs.namespace, inputs.podName, variables.podBasicInfo.firstContainer) 
+              : ""
+        - name: logSummary
+          expression: >-
+            has(expressions.logs) && expressions.logs != "" ? 
+              format("Retrieved %d log lines", size(string(expressions.logs).split("\n"))) 
+              : "No logs available"
+      outputs:
+        - name: logInfo
+          value:
+            logs: expressions.logs
+            logSummary: expressions.logSummary
+    
+    - name: getPodDescribeMcp
+      message: "Get detailed pod description using MCP tool"
+      mcpToolCall:
+        server: kubernetes-mcp
+        tool: describe-resource
+        arguments:
+          resourceType: '"Pod"'
+          namespace: 'inputs.namespace'
+          name: 'inputs.podName'
+      outputs:
+        - name: description
+          expression: 'toolResult.description'
+    
+    - name: analyzeWithAgent
+      message: "Analyze pod with logs and description"
+      dependsOn:
+        - getPodBasicInfo
+        - getPodLogs
+        - getPodDescribeMcp
+      agentRef:
+        name: pod-diagnostics-agent
+        additionalPrompts:
+          - >-
+            format("Analyze this Kubernetes pod:\n\nPod: %s | Namespace: %s\nPhase: %v | Ready: %v | Restarts: %d\n\n=== LOGS ===\n%s\n\n=== DESCRIPTION ===\n%s\n\nProvide diagnostic analysis with health status, issues, and recommendations in JSON format.",
+              inputs.podName,
+              inputs.namespace,
+              variables.podBasicInfo.phase,
+              variables.podBasicInfo.ready,
+              variables.podBasicInfo.restartCount,
+              variables.logInfo.logs,
+              variables.description)
+      outputs:
+        - name: agentAnalysis
+          value:
+            healthStatus: agentOutputs.health
+            issues: agentOutputs.issues
+            recommendations: agentOutputs.recommendations
+            fullReport: string(agentResponse)
+  
+  outputs:
+    - name: podHealth
+      expression: 'variables.agentAnalysis.healthStatus'
+    - name: diagnosticReport
+      expression: 'variables.agentAnalysis.fullReport'

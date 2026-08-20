@@ -1,0 +1,27 @@
+apiVersion: v2
+name: ottoflow
+description: A Helm chart for OttoFlow - Agentic Workflow Orchestrator for Kubernetes
+type: application
+# version and appVersion are set from the git tag by the release workflow
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
+home: https://github.com/nirmata/ottoflow
+sources:
+  - https://github.com/nirmata/ottoflow
+maintainers:
+  - name: Nirmata Team
+    email: support@nirmata.com
+keywords:
+  - kubernetes
+  - workflow
+  - orchestration
+  - ai
+  - llm
+  - cel
+  - automation
+annotations:
+  category: Workflow
+  licenses: BUSL-1.1
+  # Note: CRDs in crds/ directory are synced from config/crd/bases/
+  # Source of truth: config/crd/bases/ (generated from Go code via 'make manifests')
+  # To sync: make sync-crds (or run 'make manifests' which includes sync)

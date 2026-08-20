@@ -1,0 +1,55 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-basic-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (local provider)"
+      agentRef:
+        name: demo-agent
+        additionalPrompts:
+          - 'format("Question: %s\n\nAnswer:", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Workflow-level outputs (shown in CLI and WorkflowRun status)
+  # Step outputs are written to the shared variables map, so use variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-basic-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-basic-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: demo-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  # modelProvider is required. "local" has no built-in default model — set modelName
+  # here or pass one at run time via the CLI --model flag.
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  outputExtraction:
+    type: text

@@ -1,0 +1,17 @@
+# Minimal prometheusQuery step. Requires --prometheus-url to succeed.
+# Example: ./bin/ottoflow run prometheus-query-simple --workflow-dir samples/workflows --prometheus-url http://localhost:9090
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: prometheus-query-simple
+  namespace: ottoflow
+spec:
+  steps:
+    - name: upMetric
+      message: "Query Prometheus 'up' metric"
+      prometheusQuery:
+        query: "up"
+        timeRange: "5m"
+        outputs:
+          resultType: 'result.type'
+          valueOrCount: 'result.type == "scalar" ? double(result.value) : double(size(result.samples))'

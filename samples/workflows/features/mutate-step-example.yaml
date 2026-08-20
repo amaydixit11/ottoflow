@@ -1,0 +1,64 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: mutate-step-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: configMapName
+      description: "Name of the ConfigMap to mutate"
+      default: "my-config"
+    - name: namespace
+      description: "Namespace of the resource"
+      default: "default"
+  steps:
+    # ApplyConfiguration: CEL returns a partial object that is deep-merged onto the resource
+    - name: addLabels
+      message: "Add labels to ConfigMap via ApplyConfiguration"
+      mutate:
+        target:
+          apiVersion: v1
+          resource: ConfigMap
+          namespace: 'inputs.namespace'
+          name: 'inputs.configMapName'
+        patchType: ApplyConfiguration
+        applyConfiguration:
+          # ApplyConfiguration is a server-side apply patch, so listing only the labels to
+          # add is enough -- existing labels are preserved by the merge. Do not try to
+          # combine the existing map with `+`: CEL's + works on lists, strings and numbers,
+          # not maps, and map + map fails at evaluation even though it compiles under dyn().
+          expression: |
+            {"metadata": {"labels": {"managed-by": "ottoflow", "workflow": "mutate-step-example"}}}
+        outputs:
+          labelCount: 'size(object.metadata.labels)'
+    # JSONPatch: static list of RFC 6902 operations
+    - name: addMarkerLabel
+      message: "Add marker label via JSONPatch"
+      dependsOn:
+        - addLabels
+      mutate:
+        target:
+          apiVersion: v1
+          resource: ConfigMap
+          namespace: 'inputs.namespace'
+          name: 'inputs.configMapName'
+        patchType: JSONPatch
+        jsonPatch:
+          operations:
+            # JSON Patch "add" on a nested path requires the parent object to already
+            # exist -- /metadata/annotations/x fails on a resource with no annotations.
+            # This step depends on addLabels above, so /metadata/labels is guaranteed
+            # present. Use ApplyConfiguration (see addLabels) when the parent may be absent.
+            #
+            # "~1" is the JSON Pointer escape for "/" (RFC 6901), so this adds the single
+            # label key "ottoflow.io/last-mutated" rather than nesting under "ottoflow.io".
+            - op: add
+              path: /metadata/labels/ottoflow.io~1last-mutated
+              value: "true"
+        outputs:
+          hasMarkerLabel: '"ottoflow.io/last-mutated" in object.?metadata.labels.orValue({})'
+  outputs:
+    - name: labelsAdded
+      expression: 'variables.labelCount'
+    - name: markerLabelAdded
+      expression: 'variables.hasMarkerLabel'

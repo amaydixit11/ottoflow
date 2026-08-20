@@ -1,0 +1,637 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: steptemplates.ottoflow.nirmata.io
+spec:
+  group: ottoflow.nirmata.io
+  names:
+    kind: StepTemplate
+    listKind: StepTemplateList
+    plural: steptemplates
+    shortNames:
+    - steptemplate
+    - steptemplates
+    singular: steptemplate
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          StepTemplate is the Schema for the steptemplates API
+          StepTemplate defines a reusable step definition that can be instantiated with parameters
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: StepTemplateSpec defines the desired state of StepTemplate
+            properties:
+              description:
+                description: Description provides a human-readable description of
+                  what this template does
+                type: string
+              parameters:
+                description: Parameters defines the parameters that can be provided
+                  when instantiating this template
+                items:
+                  description: StepTemplateParameter defines a parameter for the template
+                  properties:
+                    default:
+                      description: |-
+                        Default is the default value for the parameter (CEL expression)
+                        Evaluated in workflow context if not provided in arguments
+                      type: string
+                    description:
+                      description: Description provides a human-readable description
+                        of the parameter
+                      type: string
+                    name:
+                      description: 'Name is the parameter name (used in placeholders:
+                        {{.name}})'
+                      type: string
+                    required:
+                      description: Required indicates if the parameter must be provided
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                type: array
+              step:
+                description: |-
+                  Step defines the step template that will be instantiated
+                  The step.name field will be replaced with the actual step name when instantiated
+                  Parameter placeholders in expressions/outputs use CEL variable syntax: {{.parameterName}}
+                properties:
+                  agentRef:
+                    description: |-
+                      AgentRef references an Agent CRD for AI-powered step execution
+                      AdditionalPrompts can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      additionalPrompts:
+                        description: |-
+                          AdditionalPrompts is an optional list of prompts that are appended to the agent's system prompt
+                          Each prompt can contain CEL expressions that are evaluated in the workflow context
+                          The prompts are evaluated and concatenated with the agent's base prompt
+                          Useful for adding step-specific context or instructions to the agent
+                        items:
+                          type: string
+                        type: array
+                      maxAdditionalPromptTokens:
+                        description: |-
+                          MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
+                          When set, the evaluated additional prompt text is truncated to fit this budget (rough token count).
+                          The agent's base prompt is not counted. Zero or nil means no limit.
+                        format: int32
+                        type: integer
+                      name:
+                        description: Name is the name of the Agent CRD to use
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the Agent CRD
+                          Defaults to the parent workflow namespace if not specified
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  dependsOn:
+                    description: DependsOn explicitly declares step dependencies
+                    items:
+                      type: string
+                    type: array
+                  expressions:
+                    description: |-
+                      Expressions are CEL expressions evaluated before step execution
+                      Can contain parameter placeholders: {{.parameterName}}
+                    items:
+                      description: Expression defines a CEL expression with a name
+                      properties:
+                        expression:
+                          description: Expression is the CEL expression to evaluate
+                          type: string
+                        name:
+                          description: Name is the name to store the expression result
+                          type: string
+                      required:
+                      - expression
+                      - name
+                      type: object
+                    type: array
+                  externalAgentRef:
+                    description: |-
+                      ExternalAgentRef defines a call to an external A2A-compatible agent service
+                      Prompt can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      allowInsecureHTTP:
+                        description: |-
+                          AllowInsecureHTTP permits http:// URLs, but ONLY to cluster-local hosts
+                          (a host ending in .svc or .svc.cluster.local, or exactly localhost / 127.0.0.1 / ::1).
+                          http:// to any other host is rejected even when true. https:// ignores this flag.
+                          Must NOT be combined with auth.secretRef (a bearer token would be sent in cleartext).
+                          Must also NOT be combined with caSecretRef (a CA bundle has no effect over plaintext http).
+                        type: boolean
+                      auth:
+                        description: Auth defines authentication for the external
+                          agent call
+                        properties:
+                          secretRef:
+                            description: |-
+                              SecretRef references a Secret containing the bearer token.
+                              The Key field of SecretRef specifies which key in the Secret holds the token value.
+                            properties:
+                              key:
+                                description: Key is the key in the Secret
+                                type: string
+                              name:
+                                description: Name is the name of the Secret
+                                type: string
+                              namespace:
+                                description: |-
+                                  Namespace is the namespace of the Secret. Defaults to the namespace of the
+                                  resource that references this Secret (MCPServer, Workflow, etc.).
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                        type: object
+                      caSecretRef:
+                        description: |-
+                          CASecretRef references a Secret containing a CA bundle (key: ca.crt) for TLS verification.
+                          When omitted, the system CA pool is used.
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      prompt:
+                        description: |-
+                          Prompt is a CEL expression evaluated in the workflow context; the result is sent as the task message.
+                          Can reference inputs, variables, and previous step outputs (e.g. '"Analyze: " + steps.prev.report').
+                        type: string
+                      protocol:
+                        default: a2a
+                        description: Protocol is the agent communication protocol.
+                          Currently only "a2a" is supported.
+                        enum:
+                        - a2a
+                        type: string
+                      timeout:
+                        description: 'Timeout is the maximum duration to wait for
+                          task completion (e.g. "5m", "30s"). Default: 5m.'
+                        type: string
+                      url:
+                        description: |-
+                          URL is the A2A agent card base URL (normally HTTPS, e.g. "https://kagent.example.com").
+                          http:// is permitted only when allowInsecureHTTP is set, and only to cluster-local hosts.
+                        type: string
+                    required:
+                    - prompt
+                    - url
+                    type: object
+                  failurePolicy:
+                    default: Fail
+                    description: FailurePolicy determines workflow behavior on step
+                      failure
+                    enum:
+                    - Fail
+                    - Continue
+                    type: string
+                  matchConditions:
+                    description: |-
+                      MatchConditions defines conditional execution rules for this step
+                      Expression values can contain parameter placeholders: {{.parameterName}}
+                    items:
+                      description: |-
+                        MatchCondition defines a conditional execution rule for a step
+                        Similar to Kubernetes ValidatingAdmissionPolicy matchConditions
+                        All conditions must evaluate to true for the step to execute
+                      properties:
+                        expression:
+                          description: |-
+                            Expression is a CEL expression that evaluates to a boolean
+                            Step executes only if ALL matchConditions evaluate to true
+                            If ANY condition evaluates to false, the step is skipped
+                          type: string
+                        name:
+                          description: |-
+                            Name is a unique identifier for this match condition
+                            Used for logging and visibility when conditions fail
+                          type: string
+                      required:
+                      - expression
+                      - name
+                      type: object
+                    type: array
+                  mcpToolCall:
+                    description: |-
+                      MCPToolCall defines a direct MCP tool invocation
+                      Argument values can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      arguments:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Arguments are the tool arguments
+                          Keys are argument names, values are CEL expressions evaluated in workflow context
+                        type: object
+                      server:
+                        description: Server is the name of the MCPServer CRD to use
+                        type: string
+                      tool:
+                        description: Tool is the name of the tool within the MCP server
+                        type: string
+                    required:
+                    - server
+                    - tool
+                    type: object
+                  message:
+                    description: |-
+                      Message is a human-readable description of what the step does
+                      Can contain parameter placeholders: {{.parameterName}}
+                    type: string
+                  outputs:
+                    description: |-
+                      Outputs defines key-value pairs written to shared context
+                      Expression values can contain parameter placeholders: {{.parameterName}}
+                    items:
+                      description: Output defines an output value written to shared
+                        context
+                      properties:
+                        expression:
+                          description: |-
+                            Expression is the CEL expression that evaluates to the output value
+                            Mutually exclusive with Value field. If both are specified, Value takes precedence.
+                          type: string
+                        metric:
+                          description: |-
+                            Metric optionally publishes this output's value to Prometheus.
+                            Only used for workflow-level outputs (WorkflowSpec.Outputs).
+                            The output's evaluated value becomes the metric value.
+                          properties:
+                            buckets:
+                              description: Buckets for histogram type (optional, uses
+                                default if not specified)
+                              items:
+                                type: number
+                              type: array
+                            help:
+                              description: Help is the metric description
+                              type: string
+                            labels:
+                              description: Labels are optional label key-value pairs
+                                (CEL expressions for values)
+                              items:
+                                description: MetricLabel defines a label for a custom
+                                  metric
+                                properties:
+                                  name:
+                                    description: Name is the label name
+                                    type: string
+                                  value:
+                                    description: Value is a CEL expression for the
+                                      label value (must evaluate to string)
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              type: array
+                            name:
+                              description: |-
+                                Name is the metric name (will be prefixed with ottoflow_workflow_)
+                                Must be valid Prometheus metric name: [a-zA-Z_:][a-zA-Z0-9_:]*
+                              type: string
+                            type:
+                              description: 'Type is the metric type: counter, gauge,
+                                or histogram'
+                              enum:
+                              - counter
+                              - gauge
+                              - histogram
+                              type: string
+                          required:
+                          - name
+                          - type
+                          type: object
+                        name:
+                          description: Name is the output key name
+                          type: string
+                        sensitive:
+                          description: |-
+                            Sensitive, when true, prevents writing the evaluated value to WorkflowRun status.
+                            The value remains in in-memory context for subsequent steps/metrics where applicable,
+                            but Status.Outputs will contain a redacted placeholder instead of the raw value.
+                            Use for outputs that may contain secrets or PII.
+                          type: boolean
+                        value:
+                          description: |-
+                            Value defines a native YAML structure where string values can contain CEL expressions
+                            String values that look like CEL expressions (e.g., 'inputs.podName', 'variables.count')
+                            are automatically evaluated. If evaluation fails, the literal string value is used.
+                            Mutually exclusive with Expression field. If both are specified, Value takes precedence.
+                            Stored as raw JSON bytes to support arbitrary YAML structures
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  prometheusQuery:
+                    description: |-
+                      PrometheusQuery defines a Prometheus (PromQL) query step
+                      Field values can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      outputs:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Outputs defines the outputs to extract from the Prometheus result.
+                          Keys are output names (written to variables), values are CEL expressions.
+                          Expressions can reference "result" with fields: type ("vector"|"scalar"), samples (list of {metric, value, timestamp}), value (scalar).
+                        type: object
+                      query:
+                        description: Query is the PromQL expression. May contain {{.varName}}
+                          placeholders substituted from Variables.
+                        type: string
+                      step:
+                        description: Step is the query resolution step (optional).
+                          Reserved for future range-query support.
+                        type: string
+                      timeRange:
+                        description: |-
+                          TimeRange is the lookback duration for the instant query (e.g., "7d", "1h", "5m").
+                          The query is executed at (now - timeRange).
+                        type: string
+                      variables:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Variables provides values for {{.varName}} placeholders in Query.
+                          Keys are placeholder names, values are CEL expressions evaluated in workflow context.
+                        type: object
+                    required:
+                    - query
+                    - timeRange
+                    type: object
+                  resourceQuery:
+                    description: |-
+                      ResourceQuery defines a simplified resource query
+                      Field values can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      apiVersion:
+                        description: APIVersion is the API version of the resource
+                          (e.g., "v1", "apps/v1")
+                        type: string
+                      fieldSelector:
+                        description: |-
+                          FieldSelector filters list queries. It is always evaluated as a CEL expression in
+                          workflow context and must yield a field selector string, so a literal selector has
+                          to be quoted inside the expression: '"status.phase=Running"'. An unquoted
+                          status.phase=Running is not valid CEL and fails at runtime.
+                          Only used when Name is omitted (list queries)
+                        type: string
+                      labelSelector:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          LabelSelector is a map of label key-value pairs for filtering list queries
+                          Keys are label names, values are CEL expressions evaluated in workflow context
+                          Only used when Name is omitted (list queries)
+                        type: object
+                      limit:
+                        description: |-
+                          Limit caps the number of resources returned for list queries.
+                          Resources are fetched in pages of 500; collection stops once this many
+                          items have been accumulated. When 0 (default) all pages are fetched.
+                          Use this to bound memory usage when querying large clusters.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: |-
+                          Name is the name of a specific resource (for single resource queries)
+                          If omitted, performs a list query
+                          Can be a CEL expression evaluated in workflow context
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace to query (can be a
+                          CEL expression)
+                        type: string
+                      outputs:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Outputs defines the outputs to extract from the resource(s)
+                          Keys are output names (written to variables), values are CEL expressions
+                          For single resource queries: expressions reference "object", the fetched resource
+                            (e.g., "object.status.phase"). Note "resource" is the CEL macro namespace
+                            (resource.Get/resource.List) and does not support field selection.
+                          For list queries: expressions reference "items" (the list) (e.g., "items.map(i, i.metadata.name)")
+
+                          A step's own step-level outputs are evaluated after these and can reference them as
+                          variables.<name>. On a name collision the step-level output wins.
+                        type: object
+                      pageSize:
+                        description: |-
+                          PageSize controls how many resources are fetched per API call during list pagination.
+                          Defaults to 500 when unset. Reduce this for resource-heavy types (large pod specs,
+                          CRDs with large status fields) to keep individual API responses small and reduce
+                          the chance of per-page timeouts on loaded API servers.
+                        format: int64
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                      resource:
+                        description: Resource is the kind of the resource (e.g., "Pod",
+                          "Deployment", "Service")
+                        type: string
+                    required:
+                    - apiVersion
+                    - outputs
+                    - resource
+                    type: object
+                  retry:
+                    description: Retry defines retry configuration for step execution
+                    properties:
+                      attempts:
+                        default: 1
+                        description: Attempts is the maximum number of retry attempts
+                          (including initial attempt)
+                        minimum: 1
+                        type: integer
+                      backoff:
+                        description: Backoff defines the backoff strategy for retries
+                        properties:
+                          initialInterval:
+                            default: 1s
+                            description: InitialInterval is the initial wait time
+                              before first retry (e.g., "1s", "100ms")
+                            type: string
+                          maxInterval:
+                            default: 5m
+                            description: MaxInterval is the maximum wait time between
+                              retries (e.g., "5m", "30s")
+                            type: string
+                          multiplier:
+                            default: 2
+                            description: Multiplier is the multiplier for exponential
+                              backoff (only used if strategy is exponential)
+                            type: number
+                          strategy:
+                            default: exponential
+                            description: |-
+                              Strategy is the backoff strategy
+                              none: immediate retry
+                              linear: fixed interval
+                              exponential: exponential backoff
+                            enum:
+                            - none
+                            - linear
+                            - exponential
+                            type: string
+                        type: object
+                      retryOn:
+                        description: |-
+                          RetryOn defines conditions that trigger a retry
+                          If empty, retry on all errors
+                        items:
+                          description: RetryCondition defines conditions that trigger
+                            a retry
+                          properties:
+                            errorMessage:
+                              description: ErrorMessage is an error message pattern
+                                to match (regex)
+                              type: string
+                            errorType:
+                              description: ErrorType is the error type to retry on
+                                (e.g., "NetworkError", "TimeoutError", "TransientError")
+                              type: string
+                            httpStatus:
+                              description: HTTPStatus is an array of HTTP status codes
+                                to retry on (e.g., [500, 502, 503, 504])
+                              items:
+                                type: integer
+                              type: array
+                          type: object
+                        type: array
+                    type: object
+                  timeout:
+                    description: Timeout defines maximum duration for step execution
+                    type: string
+                  workflowRef:
+                    description: |-
+                      WorkflowRef references another workflow to execute as a sub-workflow
+                      Input values can contain parameter placeholders: {{.parameterName}}
+                    properties:
+                      inputs:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Inputs provides input values for the referenced workflow
+                          Keys match input names defined in the referenced Workflow template
+                          Values are CEL expressions that are evaluated in the parent workflow context
+                        type: object
+                      name:
+                        description: Name is the name of the Workflow template to
+                          execute
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the Workflow template
+                          Defaults to the parent workflow namespace if not specified
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+            required:
+            - step
+            type: object
+          status:
+            description: StepTemplateStatus defines the observed state of StepTemplate
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the template's state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

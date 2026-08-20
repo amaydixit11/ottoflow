@@ -1,0 +1,476 @@
+# Default values for ottoflow.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Global settings
+global:
+  # Image registry (can be overridden per component)
+  imageRegistry: "ghcr.io/nirmata/ottoflow"
+  # Image pull policy
+  imagePullPolicy: IfNotPresent
+  # Image pull secrets
+  imagePullSecrets: []
+
+# Controller configuration
+controller:
+  # Controller image
+  image:
+    registry: "ghcr.io/nirmata/ottoflow"
+    repository: controller
+    # When empty, chart uses .Chart.AppVersion (fixed tag for released charts)
+    tag: ""
+    # Override image name if needed
+    nameOverride: ""
+    # Override full image if needed
+    fullOverride: ""
+
+  # Controller replica count
+  replicaCount: 1
+
+  # Controller name override
+  nameOverride: ""
+  # Full name override
+  fullnameOverride: ""
+
+  # Controller service account
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - "ALL"
+
+  # Controller resources
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity rules
+  affinity: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Pod labels
+  podLabels: {}
+
+  # Environment variables
+  env: []
+
+  # Command (optional, defaults to /ko-app/controller for ko-built images)
+  # For ko-built images: /ko-app/controller
+  # For Dockerfile images: /manager
+  command: []
+  
+  # Namespace for leader election (lease is created here). Defaults to release namespace when empty. Passed as --namespace to the controller.
+  namespace: ""
+
+  # Command arguments
+  args:
+    - --leader-elect
+
+  # Webhook trigger HTTP server configuration.
+  # The server receives signed POST requests and creates WorkflowRuns.
+  # TLS must be terminated at ingress or a service mesh sidecar — the server itself
+  # listens on plain HTTP. See docs/user/tasks/triggers.md for the full setup guide.
+  webhookTrigger:
+    # enabled controls whether --webhook-trigger-addr is passed to the controller.
+    enabled: true
+    # addr is the listen address for the webhook trigger server.
+    addr: ":8083"
+    # service creates a Kubernetes Service for the webhook trigger port so external
+    # systems can reach the endpoint. Gate it on an Ingress or LoadBalancer as needed.
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8083
+
+  # Liveness probe configuration
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8081
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+  # Readiness probe configuration
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+  # Termination grace period
+  terminationGracePeriodSeconds: 10
+
+# Validating admission webhooks. When enabled, the controller uses the internal cert manager
+# (same as agent-executor TLS) to generate a CA and serving cert, then patches the
+# ValidatingWebhookConfiguration with the CA bundle. No cert-manager or user-supplied certs required.
+webhook:
+  enabled: true
+  # Optional: override CA bundle in VWC (e.g. for custom PKI). When empty, the controller patches it from the internal CA.
+  caBundle: ""
+  # Fail = reject on webhook error; Ignore = allow if webhook unreachable.
+  # The admission server is started with the controller, so it is safe to fail closed.
+  failurePolicy: Fail
+  timeoutSeconds: 10
+  annotations: {}
+
+  # Metrics configuration
+  metrics:
+    # Enable metrics
+    enabled: true
+    # Service monitor for Prometheus
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+
+  # Prometheus URL used by workflows for CEL prometheusMetrics() queries.
+  # When set, the controller passes --prometheus-url to runner Jobs and the
+  # cost-analyzer workflow will prefer Prometheus over metrics-server for
+  # right-sizing data (windowed averages, single cluster-wide query).
+  # Leave empty to disable; cost-analyzer will fall back to metrics-server.
+  # Example: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  prometheusURL: ""
+
+# Agent Executor Service configuration
+agentExecutor:
+  # Enable agent-executor service (default: true)
+  enabled: true
+
+  # Agent Executor image
+  image:
+    registry: "ghcr.io/nirmata/ottoflow"
+    repository: agent-executor
+    # When empty, chart uses .Chart.AppVersion (fixed tag for released charts)
+    tag: ""
+    # Override full image if needed
+    fullOverride: ""
+
+  # Agent Executor replica count
+  replicaCount: 1
+
+  # Agent Executor name override
+  nameOverride: ""
+  # Full name override
+  fullnameOverride: ""
+
+  # Agent Executor service account
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - "ALL"
+
+  # Agent Executor resources
+  resources: {}
+  # Default resources (used if resources is empty):
+  # limits:
+  #   cpu: 1000m
+  #   memory: 1Gi
+  # requests:
+  #   cpu: 100m
+  #   memory: 256Mi
+
+  # GOMEMLIMIT sets Go's soft memory limit (GOMEMLIMIT env var) so the GC runs more
+  # aggressively before the pod's hard OOM limit is hit. Recommended value is ~80% of the
+  # pod memory limit. Set to "" to disable. See: https://pkg.go.dev/runtime#hdr-Environment_Variables
+  # Example: "800MiB" for a 1Gi pod limit, "400MiB" for a 512Mi pod limit.
+  goMemLimit: "800MiB"
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity rules
+  affinity: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Pod labels
+  podLabels: {}
+
+  # Namespace used for RBAC auth (SubjectAccessReview checks get configmaps/agent-executor-caller in this namespace).
+  # Defaults to release namespace.
+  callerNamespace: ""
+
+  # Environment variables
+  env: []
+
+  # Command (optional, defaults to /ko-app/agent-executor for ko-built images)
+  # For ko-built images: /ko-app/agent-executor
+  command: []
+  
+  # Command arguments
+  args: []
+
+  # Liveness probe configuration (optional, defaults provided)
+  livenessProbe: {}
+
+  # Readiness probe configuration (optional, defaults provided)
+  readinessProbe: {}
+
+  # Termination grace period
+  terminationGracePeriodSeconds: 10
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 8443
+
+  # TLS configuration (agent executor serves HTTPS)
+  # Uses internal certificate controller (kyverno/pkg) - no cert-manager required.
+  tls:
+    # Use internal cert controller to provision self-signed TLS (default).
+    # The controller creates CA and TLS secrets in the release namespace.
+    internal:
+      enabled: true
+    # Or use existing Secret: set secretName to override (disables internal cert generation)
+    secretName: ""
+
+# Workflow Runner Job image configuration
+workflowRunner:
+  image:
+    registry: "ghcr.io/nirmata/ottoflow"
+    repository: workflow-runner
+    # When empty, chart uses .Chart.AppVersion (fixed tag for released charts)
+    tag: ""
+    fullOverride: ""
+
+  # Default service account name for runner Jobs.
+  # When empty, the controller derives a per-workflow "{workflow-name}-runner" service account
+  # bound to the narrowed runner ClusterRole (see rbac.runnerClusterRole below).
+  # Setting this to the controller's own service account re-grants full controller privileges
+  # to every runner Job — only do this if you understand the privilege-escalation trade-off.
+  serviceAccountName: ""
+
+  # Image pull secret names for the runner Job pod (e.g. for private registries).
+  # When empty, falls back to global.imagePullSecrets (the chart now wires this fallback
+  # through to the controller's --workflow-runner-image-pull-secrets flag).
+  imagePullSecrets: []
+
+  # ClusterRole bound to runner service accounts. When empty, defaults to
+  # "<fullname>-runner-role" (the aggregated, least-privilege role created by this chart).
+  # MUST be set explicitly when rbac.create=false, since the default role won't exist.
+  # If you override this to a custom role, ensure the controller can bind it — see
+  # rbac.runnerClusterRole.extraResources below, which the chart's bind grant tracks.
+  clusterRole: ""
+
+  # ImagePullPolicy for the runner Job container.
+  # Set to Always to ensure nodes always pull the latest image after upgrades.
+  imagePullPolicy: IfNotPresent
+
+  # Override "app.kubernetes.io/part-of" label on runner pods (e.g. "policy-reporter" for Kyverno exemption).
+  podLabelsPartOf: ""
+
+  # Seconds after a runner Job completes before it is deleted (0 = use default 3600). Set lower (e.g. 300) for high-frequency cron to avoid pod buildup.
+  ttlSecondsAfterFinished: 0
+
+  # Secret name to inject LLM credentials into runner Jobs. Empty by default (no injection).
+  # Set to a Secret name to enable cluster-level injection, or use spec.execution.llmCredentialsSecret per run.
+  llmCredentialsSecret: ""
+
+  # When set, the runner Job pod gets a volume with this Secret (tls.crt as ca.crt at /etc/ottoflow/agent-executor-ca)
+  # so the runner can verify agent-executor TLS. Required when agentExecutor.tls.internal is enabled and runs use a different namespace.
+  # Secret must exist in each WorkflowRun namespace. Defaults to the same CA secret name as the controller when agent executor TLS is internal.
+  agentExecutorCASecret: ""
+
+# RBAC configuration
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+  # Leader election RBAC
+  leaderElection:
+    # Specifies whether leader election RBAC should be created
+    create: true
+
+  # Core ClusterRole - additional resources for core permissions
+  # Use this to add extra resources to the core ClusterRole
+  coreClusterRole:
+    extraResources: []
+    # Example:
+    # extraResources:
+    #   - apiGroups:
+    #       - ""
+    #     resources:
+    #       - secrets
+    #     verbs:
+    #       - get
+    #       - list
+
+  # View ClusterRole - additional resources for view permissions
+  # Use this to add extra resources to the view ClusterRole
+  viewClusterRole:
+    extraResources: []
+    # Example:
+    # extraResources:
+    #   - apiGroups:
+    #       - mycompany.com
+    #     resources:
+    #       - myresources
+    #     verbs:
+    #       - get
+    #       - list
+    #       - watch
+
+  # Additional ClusterRole - for custom resources and cluster-wide permissions
+  # Use this to add completely new rules to a separate aggregated ClusterRole
+  clusterRole:
+    extraResources: []
+    # Example:
+    # extraResources:
+    #   - apiGroups:
+    #       - mycompany.com
+    #     resources:
+    #       - myresources
+    #     verbs:
+    #       - create
+    #       - update
+    #       - patch
+    #       - delete
+
+  # Runner ClusterRole - additional resources for workflow runner Job service accounts.
+  # These rules aggregate ONLY into "<fullname>-runner-role" (the least-privilege role
+  # runner Jobs run as), never into the controller's own roles. Adding a rule here is
+  # covered by the controller's "bind" grant on that role, so the controller can still
+  # create ClusterRoleBindings referencing it even if the rule grants verbs the
+  # controller itself doesn't hold (Kubernetes' RBAC escalation check allows this via
+  # "bind" as an alternative to holding every referenced permission).
+  runnerClusterRole:
+    extraResources: []
+    # Example:
+    # extraResources:
+    #   - apiGroups:
+    #       - ""
+    #     resources:
+    #       - secrets
+    #     verbs:
+    #       - update
+    #       - patch
+
+# Network policy configuration
+networkPolicy:
+  # Specifies whether a NetworkPolicy should be created
+  create: true
+  # Network policy egress rules
+  egress:
+    # Allow DNS (UDP + TCP); use the automatic namespace label available since K8s 1.21
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+      ports:
+      - protocol: UDP
+        port: 53
+      - protocol: TCP
+        port: 53
+    # Allow connection to AgentExecutor Service
+    - to:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ottoflow-agent-executor
+      ports:
+      - protocol: TCP
+        port: 8443
+    # Allow Kubernetes API access (in-cluster services on 443)
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 443
+    # Allow outbound HTTPS for LLM API calls, PyPI, etc.
+    - ports:
+      - protocol: TCP
+        port: 443
+    # Allow Prometheus access (commonly port 9090)
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 9090
+    # Allow OTLP gRPC to any namespace (e.g. Jaeger, Grafana Alloy, OpenTelemetry Collector).
+    # Required when OTEL_EXPORTER_OTLP_ENDPOINT is set on the controller pod.
+    # Endpoint must use the http:// scheme for insecure gRPC (e.g. http://jaeger:4317).
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 4317
+
+# CRD installation
+crds:
+  # Specifies whether CRDs should be installed
+  install: true
+  # CRD installation mode: "install" (default) or "skip"
+  # Use "skip" if CRDs are managed outside of Helm
+  mode: install
+
+# Namespace configuration
+namespace:
+  # Namespace name (if not set, uses Release.Namespace from helm -n)
+  name: ""
+
+# Labels and annotations
+commonLabels: {}
+commonAnnotations: {}
+
+# Additional resources (for advanced users)
+additionalResources: []

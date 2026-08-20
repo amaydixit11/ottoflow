@@ -1,0 +1,51 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: mcp-tool-call-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: resourceType
+      description: "Kubernetes resource type"
+      default: "Pod"
+    - name: namespace
+      description: "Namespace to query"
+      default: "default"
+  steps:
+    - name: getResourceCount
+      message: "Get resource count using MCP tool"
+      mcpToolCall:
+        server: kubernetes-mcp
+        tool: get-resource
+        arguments:
+          # Tool arguments are resolved using CEL expressions
+          resourceType: 'inputs.resourceType'
+          namespace: 'inputs.namespace'
+      outputs:
+        - name: resourceCount
+          expression: 'toolResult.count'
+        - name: resources
+          expression: 'toolResult.items'
+    
+    - name: processResults
+      message: "Process MCP tool results"
+      dependsOn:
+        - getResourceCount
+      expressions:
+        - name: summary
+          expression: 'variables.resourceCount'
+      outputs:
+        - name: totalResources
+          expression: 'expressions.summary'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: mcp-tool-call-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: mcp-tool-call-workflow
+  inputValues:
+    resource-type: "Pod"
+    namespace: "ottoflow"

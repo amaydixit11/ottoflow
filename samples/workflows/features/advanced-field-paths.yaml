@@ -1,0 +1,113 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: cel-expressions-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to query"
+      default: "nginx-6b7f675bdc-example"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    # Example 1: CEL expressions with array indexing
+    - name: getPodWithArrayIndexing
+      message: "Get pod information using CEL expressions"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        name: 'inputs.podName'
+        outputs:
+          # Simple nested access
+          podPhase: object.status.phase
+          # Array indexing: get first container image
+          firstContainerImage: object.spec.containers[0].image
+          # Array indexing with existence check (safe access)
+          secondContainerImage: 'size(object.spec.containers) > 1 ? object.spec.containers[1].image : ""'
+          # Nested filtering: find Ready condition
+          readyCondition: object.status.conditions.filter(c, c.type == "Ready")[0].status
+          # Complex nested access: container statuses
+          containerCount: size(object.status.containerStatuses)
+          # Array indexing in nested structure
+          firstContainerStatus: 'size(object.status.containerStatuses) > 0 ? object.status.containerStatuses[0].ready : false'
+    
+    # Example 2: CEL expressions with list queries
+    - name: listPodsWithAdvancedPaths
+      message: "List pods using CEL expressions"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        outputs:
+          # Simple count
+          podCount: size(items)
+          # Map with nested access
+          podNames: items.map(i, i.metadata.name)
+          # Array indexing: get first pod name
+          firstPodName: 'size(items) > 0 ? items[0].metadata.name : ""'
+          # Array indexing: get last pod name
+          lastPodName: 'size(items) > 0 ? items[size(items)-1].metadata.name : ""'
+          # Filter with nested access: running pods
+          runningPodNames: items.filter(i, has(i.status) && has(i.status.phase) && i.status.phase == "Running").map(i, i.metadata.name)
+          # Complex: get images from first container of each pod
+          podImages: 'items.map(i, size(i.spec.containers) > 0 ? i.spec.containers[0].image : "")'
+          # Advanced: filter pods with multiple containers
+          podsWithMultipleContainers: items.filter(i, has(i.spec.containers) && size(i.spec.containers) > 1).map(i, i.metadata.name)
+          # Advanced: nested array access - get all container images
+          allContainerImages: items.map(i, i.spec.containers.map(c, c.image))
+          # Advanced: get ready status of first container for each pod
+          firstContainerReadyStatus: 'items.map(i, size(i.status.containerStatuses) > 0 ? i.status.containerStatuses[0].ready : false)'
+    
+    # Example 3: Deployment with CEL expressions
+    - name: getDeploymentDetails
+      message: "Get deployment using CEL expressions"
+      resourceQuery:
+        apiVersion: apps/v1
+        resource: Deployment
+        namespace: 'inputs.namespace'
+        labelSelector:
+          # labelSelector values are CEL, so a literal label value needs quoting inside
+          # the expression. Bare nginx would be read as an identifier.
+          app: '"nginx"'
+        outputs:
+          # Count deployments
+          deploymentCount: size(items)
+          # Get deployment names
+          deploymentNames: items.map(i, i.metadata.name)
+          # Array indexing: first deployment name
+          firstDeploymentName: 'size(items) > 0 ? items[0].metadata.name : ""'
+          # Nested access: replica counts
+          replicaCounts: items.map(i, i.spec.replicas)
+          # Advanced: get container images from first deployment
+          firstDeploymentImages: 'size(items) > 0 ? items[0].spec.template.spec.containers.map(c, c.image) : []'
+          # Advanced: filter deployments with specific replica count
+          deploymentsWithReplicas: items.filter(i, has(i.spec.replicas) && i.spec.replicas > 1).map(i, i.metadata.name)
+          # Advanced: nested array access - all container names from all deployments
+          allContainerNames: items.map(i, i.spec.template.spec.containers.map(c, c.name))
+  
+  outputs:
+    - name: podPhase
+      expression: 'variables.podPhase'
+    - name: totalPods
+      expression: 'variables.podCount'
+    - name: runningPods
+      expression: 'size(variables.runningPodNames)'
+    - name: deploymentCount
+      expression: 'variables.deploymentCount'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: advanced-field-paths-example-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: advanced-field-paths-example
+    namespace: ottoflow
+  inputValues:
+    podName: "nginx-6b7f675bdc-example"
+    namespace: "ottoflow"

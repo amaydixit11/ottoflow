@@ -1,0 +1,88 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: crd-resource-query-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: workflowName
+      description: "Name of the Workflow CRD to query"
+      default: "simple-greeting"
+    - name: namespace
+      description: "Namespace"
+      default: "ottoflow"
+  
+  steps:
+    # Example 1: Query a Workflow CRD (Custom Resource)
+    - name: getWorkflowCRD
+      message: "Get Workflow CRD using resourceQuery"
+      resourceQuery:
+        apiVersion: ottoflow.nirmata.io/v1alpha1
+        resource: Workflow
+        namespace: 'inputs.namespace'
+        name: 'inputs.workflowName'
+        outputs:
+          workflowName: object.metadata.name
+          namespace: object.metadata.namespace
+          hasSteps: has(object.spec.steps)
+          stepCount: size(object.spec.steps)
+          # Nested access with array indexing
+          firstStepName: object.spec.steps[0].name
+          # Array access with existence check
+          hasInputs: has(object.spec.inputs) && size(object.spec.inputs) > 0
+    
+    # Example 2: List Workflow CRDs with filtering
+    - name: listWorkflowCRDs
+      message: "List all Workflow CRDs in namespace"
+      resourceQuery:
+        apiVersion: ottoflow.nirmata.io/v1alpha1
+        resource: Workflow
+        namespace: 'inputs.namespace'
+        outputs:
+          workflowCount: size(items)
+          workflowNames: items.map(i, i.metadata.name)
+          # Filter workflows with steps
+          workflowsWithSteps: items.filter(i, has(i.spec.steps) && size(i.spec.steps) > 0).map(i, i.metadata.name)
+          # Array indexing - get first workflow name
+          firstWorkflowName: 'size(items) > 0 ? items[0].metadata.name : ""'
+    
+    # Example 3: Query WorkflowRun CRD (another CRD example)
+    - name: listWorkflowRuns
+      message: "List WorkflowRun CRDs"
+      dependsOn:
+        - getWorkflowCRD
+      resourceQuery:
+        apiVersion: ottoflow.nirmata.io/v1alpha1
+        resource: WorkflowRun
+        namespace: 'inputs.namespace'
+        labelSelector:
+          # Note: Label selectors work with CRDs too
+          app: '"ottoflow"'
+        outputs:
+          runCount: size(items)
+          runNames: items.map(i, i.metadata.name)
+          # Nested field access with filtering
+          succeededRuns: items.filter(i, has(i.status) && has(i.status.phase) && i.status.phase == "Succeeded").map(i, i.metadata.name)
+          # Array indexing - get latest run name
+          latestRunName: 'size(items) > 0 ? items[size(items)-1].metadata.name : ""'
+  
+  outputs:
+    - name: workflowInfo
+      expression: 'variables.workflowName'
+    - name: totalWorkflows
+      expression: 'variables.workflowCount'
+    - name: workflowRunsFound
+      expression: 'variables.runCount'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: crd-resource-query-example-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: crd-resource-query-example
+    namespace: ottoflow
+  inputValues:
+    workflowName: "simple-greeting"
+    namespace: "ottoflow"

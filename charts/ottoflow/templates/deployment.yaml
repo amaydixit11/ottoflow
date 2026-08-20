@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ottoflow.fullname" . }}
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: manager
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ottoflow.selectorLabels.n6" . }}
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ottoflow.selectorLabels.n8" . }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "ottoflow.imagePullSecrets" . | indent 6 }}
+      serviceAccountName: {{ if .Values.controller.serviceAccount.name }}{{ .Values.controller.serviceAccount.name }}{{ else }}controller-manager{{ end }}
+      securityContext:
+        {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: manager
+        image: {{ include "ottoflow.controllerImage" . }}
+        imagePullPolicy: {{ include "ottoflow.imagePullPolicy" . }}
+        {{- if .Values.controller.command }}
+        command:
+        {{- range .Values.controller.command }}
+        - {{ . }}
+        {{- end }}
+        {{- else }}
+        # ko builds binaries to /ko-app/<import-path-basename>
+        # For github.com/nirmata/ottoflow/cmd/controller, binary is at /ko-app/controller
+        command:
+        - /ko-app/controller
+        {{- end }}
+        args:
+        {{- range .Values.controller.args }}
+        - {{ . }}
+        {{- end }}
+        - --namespace={{ .Values.controller.namespace | default (include "ottoflow.namespace" .) }}
+        - --workflow-runner-image={{ include "ottoflow.workflowRunnerImage" . }}
+        - --workflow-runner-service-account={{ .Values.workflowRunner.serviceAccountName }}
+        - --workflow-runner-cluster-role={{ include "ottoflow.workflowRunnerClusterRole" . }}
+        {{- if .Values.workflowRunner.podLabelsPartOf }}
+        - --workflow-runner-pod-labels-part-of={{ .Values.workflowRunner.podLabelsPartOf }}
+        {{- end }}
+        {{- if .Values.workflowRunner.ttlSecondsAfterFinished }}
+        - --workflow-runner-ttl-seconds-after-finished={{ .Values.workflowRunner.ttlSecondsAfterFinished }}
+        {{- end }}
+        {{/* Intentionally unconditional: an empty value explicitly disables credential injection in the controller.
+             A {{- if}} guard would treat "" as falsy and fall back to the binary default, preventing disable. */}}
+        - --workflow-runner-llm-credentials-secret={{ .Values.workflowRunner.llmCredentialsSecret }}
+        {{- $runnerPullSecrets := .Values.workflowRunner.imagePullSecrets | default .Values.global.imagePullSecrets }}
+        {{- if $runnerPullSecrets }}
+        - --workflow-runner-image-pull-secrets={{ join "," $runnerPullSecrets }}
+        {{- end }}
+        {{- if .Values.controller.prometheusURL }}
+        - --prometheus-url={{ .Values.controller.prometheusURL }}
+        {{- end }}
+        {{- if and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled }}
+        - --webhook-trigger-addr={{ .Values.controller.webhookTrigger.addr | default ":8083" }}
+        {{- end }}
+        {{- if .Values.agentExecutor.enabled }}
+        - --agent-executor-caller-cluster-role={{ printf "%s-agent-executor-caller" (include "ottoflow.fullname" .) }}
+        - --agent-executor-service-name={{ include "ottoflow.agentExecutor.fullname" . }}
+        - --agent-executor-namespace={{ include "ottoflow.namespace" . }}
+        {{- if and .Values.agentExecutor.tls.internal.enabled (not .Values.agentExecutor.tls.secretName) }}
+        - --workflow-runner-agent-executor-ca-secret={{ .Values.workflowRunner.agentExecutorCASecret | default (include "ottoflow.agentExecutor.caSecretName" .) }}
+        {{- end }}
+        {{- end }}
+        securityContext:
+          {{- toYaml .Values.controller.securityContext | nindent 10 }}
+        {{- if or .Values.webhook.enabled .Values.controller.env }}
+        env:
+        {{- if .Values.webhook.enabled }}
+        - name: WEBHOOK_SERVICE_NAME
+          value: {{ include "ottoflow.fullname" . }}-webhook
+        - name: WEBHOOK_CONFIG_NAME
+          value: {{ include "ottoflow.fullname" . }}-validating
+        {{- end }}
+        {{- if .Values.controller.env }}
+        {{- range .Values.controller.env }}
+        - name: {{ .name }}
+          {{- if .value }}
+          value: {{ .value | quote }}
+          {{- end }}
+          {{- if .valueFrom }}
+          valueFrom:
+            {{- toYaml .valueFrom | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if and .Values.agentExecutor.enabled .Values.agentExecutor.tls.internal.enabled (not .Values.agentExecutor.tls.secretName) }}
+        volumeMounts:
+        - name: agent-executor-ca
+          mountPath: /etc/ottoflow/agent-executor-ca
+          readOnly: true
+        {{- end }}
+        livenessProbe:
+          {{- toYaml .Values.controller.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.controller.readinessProbe | nindent 10 }}
+        resources:
+          {{- toYaml .Values.controller.resources | nindent 10 }}
+        {{- if or .Values.webhook.enabled (and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled) }}
+        ports:
+        {{- if .Values.webhook.enabled }}
+          - containerPort: 9443
+            name: webhook
+            protocol: TCP
+        {{- end }}
+        {{- if and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled }}
+          - containerPort: 8083
+            name: webhook-trigger
+            protocol: TCP
+        {{- end }}
+        {{- end }}
+      {{- if and .Values.agentExecutor.enabled .Values.agentExecutor.tls.internal.enabled (not .Values.agentExecutor.tls.secretName) }}
+      volumes:
+      - name: agent-executor-ca
+        secret:
+          secretName: {{ include "ottoflow.agentExecutor.caSecretName" . }}
+          items:
+          - key: tls.crt
+            path: ca.crt
+          optional: true
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds }}
+

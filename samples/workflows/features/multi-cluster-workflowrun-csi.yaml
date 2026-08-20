@@ -1,0 +1,31 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-query-csi-kubeconfig-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-query-example
+    namespace: ottoflow
+  # The runner Job reads kubeconfig from a CSI-mounted file.
+  clusterRef:
+    kubeConfigFilePath: /var/run/ottoflow/kubeconfigs/config
+  execution:
+    job:
+      volumes:
+        - name: target-kubeconfig
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: remote-cluster-kubeconfig
+      volumeMounts:
+        - name: target-kubeconfig
+          mountPath: /var/run/ottoflow/kubeconfigs
+          readOnly: true
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+  inputValues:
+    podName: "nginx"
+    namespace: "ottoflow"
+    appName: "my-app"

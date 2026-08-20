@@ -1,0 +1,21 @@
+{{- if and .Values.controller .Values.controller.metrics .Values.controller.metrics.enabled .Values.controller.metrics.serviceMonitor .Values.controller.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "ottoflow.fullname" . }}
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: metrics
+    {{- with .Values.controller.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ottoflow.selectorLabels.n6" . }}
+  endpoints:
+  - port: metrics
+    interval: {{ .Values.controller.metrics.serviceMonitor.interval | default "30s" }}
+    scrapeTimeout: {{ .Values.controller.metrics.serviceMonitor.scrapeTimeout | default "10s" }}
+{{- end }}

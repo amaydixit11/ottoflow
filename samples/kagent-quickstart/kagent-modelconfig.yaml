@@ -1,0 +1,19 @@
+---
+# kagent ModelConfig — points kagent at an Anthropic model.
+# Written against kagent v0.10.x (CRD group kagent.dev, storage version v1alpha2).
+#
+# The API key is read from a Kubernetes Secret in the kagent namespace (see README
+# step 2). kagent reads key `ANTHROPIC_API_KEY` from Secret `anthropic-key`.
+#
+# Default: Anthropic (Claude). To use any other kagent-supported provider
+# (OpenAI, Google, Azure, Ollama, ...), see "Using a different LLM provider" in README.md.
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: anthropic-model
+  namespace: kagent
+spec:
+  provider: Anthropic
+  model: claude-sonnet-4-5
+  apiKeySecret: anthropic-key
+  apiKeySecretKey: ANTHROPIC_API_KEY

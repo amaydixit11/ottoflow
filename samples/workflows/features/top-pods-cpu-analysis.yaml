@@ -1,0 +1,86 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: top-pods-cpu-analysis
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to analyze"
+      default: "default"
+    - name: topN
+      description: "Number of top pods to return"
+      default: "10"
+  
+  steps:
+    # Use StepTemplate to list pods, get CPU metrics, and identify top consumers
+    - name: analyzeTopPodsByCPU
+      message: "Get top pods by CPU usage"
+      stepTemplateRef:
+        name: top-pods-by-cpu
+        namespace: ottoflow
+        arguments:
+          namespace: 'inputs.namespace'
+          topN: 'inputs.topN'
+    
+    # Step 3: Generate recommendations
+    - name: generateRecommendations
+      message: "Generate CPU scaling recommendations"
+      dependsOn:
+        - analyzeTopPodsByCPU
+      expressions:
+        - name: recommendations
+          expression: >-
+            variables.topPodsAnalysis.podsNeedingMoreCPU.map(pod, 
+              {
+                "podName": dyn(pod.name),
+                "currentCPU": dyn(format("%dm", pod.cpuMilli)),
+                "recommendation": dyn(format("Consider increasing CPU requests/limits for pod %s (currently using %dm)", pod.name, pod.cpuMilli)),
+                "priority": dyn(pod.cpuMilli > 1000 ? "high" : "medium")
+              }
+            )
+        - name: summary
+          expression: >-
+            format(
+              "Found %d pods using high CPU. Top %d pods consume %dm total CPU (avg: %dm). %d pods may need CPU scaling.",
+              variables.topPodsAnalysis.totalPods,
+              size(variables.topPodsAnalysis.topNPods),
+              variables.topPodsAnalysis.totalCPUUsageMilli,
+              variables.topPodsAnalysis.averageCPUUsageMilli,
+              size(variables.topPodsAnalysis.podsNeedingMoreCPU)
+            )
+        - name: topPodsFormatted
+          expression: >-
+            variables.topPodsAnalysis.topNPods.map(p, 
+              {
+                "name": dyn(p.name),
+                "cpuUsage": dyn(format("%dm", p.cpuMilli)),
+                "metrics": dyn(p.metrics)
+              }
+            )
+      outputs:
+        - name: recommendations
+          value:
+            summary: expressions.summary
+            recommendations: expressions.recommendations
+            topPods: expressions.topPodsFormatted
+  
+  outputs:
+    - name: topPodsSummary
+      expression: 'variables.recommendations.summary'
+    - name: topPodsList
+      expression: 'variables.recommendations.topPods'
+    - name: scalingRecommendations
+      expression: 'variables.recommendations.recommendations'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: top-pods-cpu-analysis-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: top-pods-cpu-analysis
+  inputValues:
+    namespace: "ottoflow"
+    topN: "10"

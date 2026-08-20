@@ -1,0 +1,41 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: resource-metrics-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to get metrics for"
+      default: "test-pod"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    - name: getPodMetrics
+      message: "Get pod metrics using resourceMetrics macro"
+      expressions:
+        - name: metrics
+          expression: 'resourceMetrics("v1", "Pod", inputs.namespace, inputs.podName, "")'
+        - name: totalCPU
+          expression: 'expressions.metrics.totalCPU'
+        - name: totalMemory
+          expression: 'expressions.metrics.totalMemory'
+        - name: containerCount
+          expression: 'size(expressions.metrics.containers)'
+      outputs:
+        - name: metricsInfo
+          value:
+            timestamp: expressions.metrics.timestamp
+            window: expressions.metrics.window
+            totalCPU: expressions.totalCPU
+            totalMemory: expressions.totalMemory
+            containerCount: expressions.containerCount
+            containers: expressions.metrics.containers
+  
+  outputs:
+    - name: podCPUUsage
+      expression: 'variables.metricsInfo.totalCPU'
+    - name: podMemoryUsage
+      expression: 'variables.metricsInfo.totalMemory'

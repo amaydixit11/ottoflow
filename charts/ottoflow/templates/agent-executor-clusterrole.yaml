@@ -1,0 +1,50 @@
+{{- if and .Values.agentExecutor.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.agentExecutor.fullname" . }}-role
+  labels:
+    {{- include "ottoflow.agentExecutor.labels.n4" . }}
+rules:
+  # Agents - needed to read Agent CRDs
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - agents
+    verbs:
+      - get
+      - list
+      - watch
+  # MCPServers - needed to read MCPServer CRDs
+  - apiGroups:
+      - ottoflow.nirmata.io
+    resources:
+      - mcpservers
+    verbs:
+      - get
+      - list
+      - watch
+  # Secrets - needed for LLM API keys and MCP server credentials
+  # Note: This is read-only access. Consider restricting to specific namespaces or secret names in production.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+  # TokenReview - needed to authenticate incoming requests from the controller
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  # SubjectAccessReview - needed to authorize callers (check get configmaps/agent-executor-caller)
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+{{- end }}

@@ -1,0 +1,65 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: gpu-metrics-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the GPU pod to get metrics for"
+      default: "gpu-pod"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    # Example 1: Standard CPU/memory metrics (existing behavior)
+    - name: getStandardMetrics
+      message: "Get standard CPU/memory metrics"
+      expressions:
+        - name: standardMetrics
+          expression: 'resourceMetrics("v1", "Pod", inputs.namespace, inputs.podName, "")'
+      outputs:
+        - name: standardMetricsInfo
+          value:
+            timestamp: expressions.standardMetrics.timestamp
+            totalCPU: expressions.standardMetrics.totalCPU
+            totalMemory: expressions.standardMetrics.totalMemory
+    
+    # Example 2: Custom metrics (GPU utilization) via Custom Metrics API
+    - name: getGPUMetrics
+      message: "Get GPU metrics using Custom Metrics API"
+      dependsOn:
+        - getStandardMetrics
+      expressions:
+        - name: gpuUtilization
+          expression: 'resourceMetrics("v1", "Pod", inputs.namespace, inputs.podName, "nvidia_com_gpu_utilization")'
+        - name: gpuMemoryUsed
+          expression: 'resourceMetrics("v1", "Pod", inputs.namespace, inputs.podName, "nvidia_com_gpu_memory_used")'
+      outputs:
+        - name: gpuMetricsInfo
+          value:
+            gpuUtilization: expressions.gpuUtilization.value
+            gpuMemoryUsed: expressions.gpuMemoryUsed.value
+            gpuUtilizationTimestamp: expressions.gpuUtilization.timestamp
+    
+    # Example 3: Prometheus metrics (GPU metrics via Prometheus)
+    - name: getPrometheusGPUMetrics
+      message: "Get GPU metrics using Prometheus"
+      expressions:
+        - name: prometheusGPUQuery
+          expression: >-
+            prometheusMetrics(
+              'nvidia_gpu_utilization{pod="' + inputs.podName + '", namespace="' + inputs.namespace + '"}',
+              '5m'
+            )
+      outputs:
+        - name: prometheusMetricsInfo
+          value:
+            queryResult: expressions.prometheusGPUQuery
+  
+  outputs:
+    - name: gpuUtilizationPercent
+      expression: 'variables.gpuMetricsInfo.gpuUtilization'
+    - name: gpuMemoryBytes
+      expression: 'variables.gpuMetricsInfo.gpuMemoryUsed'

@@ -1,0 +1,18 @@
+{{- if and .Values.rbac.create .Values.rbac.leaderElection.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-leader-election-rolebinding
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ottoflow.fullname" . }}-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: {{ if .Values.controller.serviceAccount.name }}{{ .Values.controller.serviceAccount.name }}{{ else }}controller-manager{{ end }}
+  namespace: {{ include "ottoflow.namespace" . }}
+{{- end }}

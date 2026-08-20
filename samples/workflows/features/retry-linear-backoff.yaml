@@ -1,0 +1,44 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: retry-linear-backoff
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: max-attempts
+      description: "Maximum retry attempts"
+      default: "4"
+  steps:
+    - name: simulateTransientError
+      message: "Simulate transient error with linear backoff"
+      retry:
+        attempts: 4
+        backoff:
+          strategy: linear
+          initialInterval: "3s"
+          maxInterval: "30s"
+      expressions:
+        - name: attempt-count
+          expression: 'int(inputs["max-attempts"])'
+        - name: should-succeed
+          # This will fail initially, succeed on retry
+          # In a real scenario, this would check external state
+          expression: 'expressions["attempt-count"] > 2'
+      outputs:
+        - name: result
+          expression: '"Succeeded after retries"'
+  outputs:
+    - name: completion-message
+      expression: 'variables.result'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: retry-linear-backoff-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: retry-linear-backoff
+    namespace: ottoflow
+  inputValues:
+    max-attempts: "4"

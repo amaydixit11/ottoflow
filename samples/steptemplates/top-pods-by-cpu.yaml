@@ -1,0 +1,70 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: top-pods-by-cpu
+  namespace: ottoflow
+spec:
+  description: "List pods in namespace, get CPU metrics per pod, and return top N by CPU usage"
+  parameters:
+    - name: namespace
+      description: "Namespace to analyze"
+      default: '"default"'
+    - name: topN
+      description: "Number of top pods to return"
+      default: "10"
+  step:
+    message: "Get top {{.topN}} pods by CPU in namespace {{.namespace}}"
+    # A step takes exactly one action, and `expressions` are not evaluated on a
+    # resourceQuery step -- so the pod listing is done with resource.List() here rather
+    # than as a resourceQuery, keeping this a single-action step a StepTemplate can hold.
+    expressions:
+      - name: podList
+        expression: 'resource.List("v1", "Pod", "{{.namespace}}", {}).items'
+      - name: podNames
+        expression: 'expressions.podList.map(i, i.metadata.name)'
+      - name: podCount
+        expression: 'size(expressions.podList)'
+      - name: podMetricsList
+        expression: >-
+          expressions.podNames.map(podName,
+            {
+              "name": dyn(podName),
+              "metrics": dyn(resourceMetrics("v1", "Pod", "{{.namespace}}", podName, ""))
+            }
+          ).map(p,
+            {
+              "name": dyn(p.name),
+              "metrics": dyn(p.metrics),
+              "cpuMilli": dyn(has(p.metrics.totalCPU) ? int(string(p.metrics.totalCPU).replace("m", "")) : 0)
+            }
+          )
+      - name: podsWithMetrics
+        expression: >-
+          expressions.podMetricsList.filter(p, has(p.metrics) && has(p.metrics.totalCPU) && p.cpuMilli > 0)
+      - name: sortedPods
+        expression: >-
+          expressions.podsWithMetrics.filter(p,
+            size(expressions.podsWithMetrics.filter(other, other.cpuMilli > p.cpuMilli)) < int("{{.topN}}")
+          )
+      - name: totalCPUUsage
+        expression: 'expressions.sortedPods.map(p, p.cpuMilli).sum()'
+      - name: averageCPUUsage
+        expression: >-
+          size(expressions.sortedPods) > 0
+            ? expressions.totalCPUUsage / size(expressions.sortedPods)
+            : 0
+      - name: podsNeedingMoreCPU
+        expression: >-
+          expressions.sortedPods.filter(p, p.cpuMilli > expressions.averageCPUUsage)
+    outputs:
+      - name: topPodsAnalysis
+        expression: >-
+          {
+            "namespace": dyn("{{.namespace}}"),
+            "totalPods": dyn(expressions.podCount),
+            "topNPods": dyn(expressions.sortedPods),
+            "totalCPUUsageMilli": dyn(expressions.totalCPUUsage),
+            "averageCPUUsageMilli": dyn(expressions.averageCPUUsage),
+            "podsNeedingMoreCPU": dyn(expressions.podsNeedingMoreCPU),
+            "analysisTimestamp": dyn(string(time.now()))
+          }

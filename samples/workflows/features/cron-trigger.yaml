@@ -1,0 +1,27 @@
+# Simple cron trigger: runs every 5 minutes.
+# The Forbid concurrency policy prevents overlapping runs — if a previous
+# run is still Pending or Running when the schedule fires, the new run is
+# skipped.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: scheduled-heartbeat
+  namespace: ottoflow
+spec:
+  steps:
+    - name: heartbeat
+      expressions:
+        - name: ts
+          expression: 'string(time.now())'
+      outputs:
+        - name: timestamp
+          expression: 'expressions.ts'
+        - name: message
+          expression: '"Heartbeat at " + expressions.ts'
+  outputs:
+    - name: heartbeat
+      expression: 'variables.message'
+  triggers:
+    - cron:
+        schedule: "*/5 * * * *"     # every 5 minutes
+        concurrencyPolicy: "Forbid"

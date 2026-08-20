@@ -1,0 +1,68 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-health-check
+  namespace: ottoflow
+spec:
+  steps:
+    - name: getAllPods
+      message: "Get all pods"
+      expressions:
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", "", {})).items'
+      outputs:
+        - name: allPods
+          expression: 'expressions.allPods'
+    
+    - name: collectUnhealthyPods
+      message: "Analyze pod health status"
+      dependsOn:
+        - getAllPods
+      expressions:
+        - name: unhealthyPods
+          expression: >-
+            variables.allPods.filter(p, 
+              p.status.phase != "Running" && p.status.phase != "Succeeded" ||
+              (has(p.status.conditions) && !p.status.conditions.exists(c, c.type == "Ready" && c.status == "True"))
+            )
+        - name: podHealthDetails
+          expression: >-
+            expressions.unhealthyPods.map(p, {
+              "name": p.metadata.name,
+              "namespace": p.metadata.namespace,
+              "phase": p.status.phase,
+              "ready": dyn(p.status.?conditions.orValue([]).exists(c, c.type == "Ready" && c.status == "True")),
+              "conditions": dyn(p.status.?conditions.orValue([]).map(c, {
+                "type": c.type,
+                "status": c.status,
+                "reason": c.?reason.orValue(""),
+                "message": c.?message.orValue("")
+              })),
+              "restartCount": dyn(size(p.status.?containerStatuses.orValue([])) > 0 ? p.status.containerStatuses.map(c, int(c.restartCount)).sum() : 0),
+              "containerStatuses": dyn(p.status.?containerStatuses.orValue([]).map(c, {
+                "name": c.name,
+                "ready": dyn(c.ready),
+                "restartCount": dyn(int(c.restartCount)),
+                "stateType": dyn(
+                  c.state.?waiting.orValue(null) != null ? "waiting" :
+                  c.state.?running.orValue(null) != null ? "running" :
+                  c.state.?terminated.orValue(null) != null ? "terminated" : "unknown"
+                ),
+                "stateReason": c.state.?waiting.reason.orValue(c.state.?terminated.reason.orValue("")),
+                "stateMessage": c.state.?waiting.message.orValue(c.state.?terminated.message.orValue("")),
+                "exitCode": dyn(int(c.state.?terminated.exitCode.orValue(0)))
+              }))
+            })
+      outputs:
+        - name: unhealthyPodsReport
+          value:
+            totalPods: size(variables.allPods)
+            healthyPods: size(variables.allPods) - size(expressions.unhealthyPods)
+            unhealthyPods: size(expressions.unhealthyPods)
+            clusterHealth: >-
+              size(expressions.unhealthyPods) == 0 ? "Healthy" : "Issues Detected"
+            issues: expressions.podHealthDetails
+  
+  outputs:
+    - name: unhealthyPodsReport
+      expression: 'variables.unhealthyPodsReport'

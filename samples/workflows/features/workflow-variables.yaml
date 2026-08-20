@@ -1,0 +1,60 @@
+# Workflow-level variables (workflow_types.go): evaluated once, sequentially,
+# before any step; later variables may reference earlier ones.
+# Read them as variables.<name>. Step outputs land in the SAME flat map
+# (context.go WriteStepOutputs), so pick names that do not collide.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: workflow-variables
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to describe"
+      default: "default"
+    - name: threshold
+      description: "Pod count threshold"
+      default: "5"
+
+  variables:
+    - name: targetNamespace
+      expression: 'inputs.namespace'
+    - name: thresholdCount
+      expression: 'int(inputs.threshold)'
+    - name: banner
+      expression: '"Checking " + variables.targetNamespace + " against threshold " + string(variables.thresholdCount)'
+
+  steps:
+    - name: countPods
+      message: "Count pods using workflow variables"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'variables.targetNamespace'
+        # Each entry is evaluated independently against the same query result, so one
+        # cannot reference another (overThreshold can't use variables.podCount). A
+        # step-level `outputs:` block runs after these and can reference them by name.
+        outputs:
+          podCount: size(items)
+          overThreshold: size(items) > variables.thresholdCount
+
+  outputs:
+    - name: banner
+      expression: 'variables.banner'
+    - name: podCount
+      expression: 'variables.podCount'
+    - name: overThreshold
+      expression: 'variables.overThreshold'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: workflow-variables-run
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: workflow-variables
+    namespace: ottoflow
+  inputValues:
+    namespace: "ottoflow"
+    threshold: "5"

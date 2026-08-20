@@ -1,0 +1,135 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: kyverno-cel-libraries-example-36
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: imageRef
+      description: Container image reference to analyze
+      default: "nginx:latest"
+    - name: serviceUrl
+      description: External service URL to check
+      default: "https://httpbin.org/json"
+    - name: jsonData
+      description: JSON string to parse
+      default: '{"name": "test", "value": 42}'
+  
+  steps:
+    # Hash Library Example
+    - name: computeHash
+      expressions:
+        - name: imageHash
+          expression: 'sha256(inputs.imageRef)'
+        - name: dataHash
+          expression: 'md5(inputs.jsonData)'
+      outputs:
+        - name: imageHash
+          expression: 'expressions.imageHash'
+        - name: dataHash
+          expression: 'expressions.dataHash'
+
+    # Image Library Example
+    - name: analyzeImage
+      expressions:
+        - name: imageObj
+          expression: 'image(inputs.imageRef)'
+        - name: registry
+          expression: 'image(inputs.imageRef).registry()'
+        - name: repository
+          expression: 'image(inputs.imageRef).repository()'
+        - name: tag
+          expression: 'image(inputs.imageRef).tag()'
+        - name: hasDigest
+          expression: 'image(inputs.imageRef).containsDigest()'
+      outputs:
+        - name: registry
+          expression: 'expressions.registry'
+        - name: repository
+          expression: 'expressions.repository'
+        - name: tag
+          expression: 'expressions.tag'
+        - name: hasDigest
+          expression: 'expressions.hasDigest'
+
+    # HTTP Library Example
+    - name: httpRequest
+      expressions:
+        - name: httpResponse
+          expression: 'http.Get(inputs.serviceUrl)'
+        - name: statusOk
+          expression: 'http.Get(inputs.serviceUrl).?status.orValue("") == "ok"'
+      outputs:
+        - name: response
+          expression: 'expressions.httpResponse'
+
+    # JSON Library Example
+    - name: parseJson
+      expressions:
+        - name: parsedData
+          expression: 'json.unmarshal(inputs.jsonData)'
+        - name: nameValue
+          expression: 'json.unmarshal(inputs.jsonData).name'
+        - name: valueValue
+          expression: 'json.unmarshal(inputs.jsonData).value'
+      outputs:
+        - name: name
+          expression: 'expressions.nameValue'
+        - name: value
+          expression: 'expressions.valueValue'
+
+    # Math Library Example
+    - name: mathOperations
+      expressions:
+        - name: roundedValue
+          expression: 'math.round(3.14159, 2)'
+        - name: roundedToHundreds
+          expression: 'math.round(12345.6789, -2)'
+      outputs:
+        - name: roundedValue
+          expression: 'expressions.roundedValue'
+        - name: roundedToHundreds
+          expression: 'expressions.roundedToHundreds'
+
+    # Random Library Example
+    - name: generateRandom
+      expressions:
+        - name: randomId
+          expression: 'random()'
+        - name: randomPattern
+          expression: 'random("[A-Z0-9]{8}-[A-Z0-9]{4}")'
+      outputs:
+        - name: randomId
+          expression: 'expressions.randomId'
+        - name: randomPattern
+          expression: 'expressions.randomPattern'
+
+    # Time Library Example
+    - name: timeOperations
+      expressions:
+        - name: currentTime
+          expression: 'time.now()'
+        - name: oneDayAgo
+          expression: 'time.now() - duration("24h")'
+        - name: cronFormat
+          expression: 'time.toCron(time.now())'
+      outputs:
+        - name: currentTime
+          expression: 'expressions.currentTime'
+        - name: oneDayAgo
+          expression: 'expressions.oneDayAgo'
+        - name: cronFormat
+          expression: 'expressions.cronFormat'
+
+    # Transform Library Example
+    - name: transformData
+      expressions:
+        - name: list1
+          expression: '[{"id": "a"}, {"id": "b"}]'
+        - name: list2
+          expression: '[{"val": 1}, {"val": 2}]'
+        - name: mapped
+          expression: 'listObjToMap(expressions.list1, expressions.list2, "id", "val")'
+      outputs:
+        - name: mapped
+          expression: 'expressions.mapped'

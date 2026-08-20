@@ -1,0 +1,71 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-step-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: deploymentName
+      description: "Deployment to analyze"
+      default: "nginx"
+    - name: namespace
+      description: "Namespace"
+      default: "default"
+  
+  steps:
+    - name: getDeployment
+      message: "Get deployment information"
+      expressions:
+        - name: deployment
+          expression: 'resource.Get("apps/v1", "Deployment", inputs.namespace, inputs.deploymentName)'
+        # resource.Get returns null when the resource is absent, so every field access
+        # below is guarded by this check rather than assuming the deployment is there.
+        - name: deploymentExists
+          expression: 'expressions.deployment != null'
+        - name: replicas
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.replicas : 0'
+        - name: image
+          expression: 'expressions.deploymentExists ? expressions.deployment.spec.template.spec.containers[0].image : ""'
+      outputs:
+        - name: replicas
+          expression: 'expressions.replicas'
+        - name: image
+          expression: 'expressions.image'
+    
+    - name: analyzeWithAgent
+      message: "Use AI agent to analyze deployment"
+      dependsOn:
+        - getDeployment
+      agentRef:
+        name: analysis-agent
+        namespace: ottoflow
+        # Optional: add additional prompts that are appended to the agent's system prompt
+        # Each prompt can contain CEL expressions that reference workflow context like inputs, variables, and step outputs
+        additionalPrompts:
+          - >-
+            format("Analyze this Kubernetes deployment:\nName: %s\nNamespace: %s\nReplicas: %d\nImage: %s\n\nProvide optimization recommendations.",
+              inputs.deploymentName,
+              inputs.namespace,
+              variables.replicas,
+              variables.image)
+      outputs:
+        - name: recommendations
+          # The agent declares outputExtraction pattern "$.recommendations", so the agent
+          # output is already narrowed to that value. A JSONPath selecting a non-object is
+          # returned under "result" -- reading agentOutputs.recommendations here would look
+          # for the key inside the already-extracted value.
+          expression: 'agentOutputs.result'
+        - name: analysisResult
+          expression: 'agentResponse'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-step-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-step-workflow
+  inputValues:
+    deploymentName: "nginx"
+    namespace: "ottoflow"

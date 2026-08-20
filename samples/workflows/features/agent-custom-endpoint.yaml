@@ -1,0 +1,102 @@
+# Demonstrates Agent.spec.config: what it does, and — more importantly —
+# what it does NOT do for each provider. Verified against the pinned gollm
+# dependency, not assumed.
+#
+# Agent.spec.config effectiveness by provider:
+#   - endpoint:
+#       * azure-openai (gollm azopenai provider, azopenai.go:62-64): honored.
+#         Overrides AZURE_OPENAI_ENDPOINT. NOTE: the scheme is FORCED to
+#         https regardless of what you set here.
+#       * openai: IGNORED. openai instead takes its base URL from the
+#         OPENAI_ENDPOINT or OPENAI_API_BASE process environment variable
+#         (set via the agent-executor pod's env, e.g. Helm
+#         `agentExecutor.env`). OPENAI_BASE_URL is in ottoflow's
+#         LLMEnvAllowlist (exec_client.go:64) but gollm's openai provider
+#         never reads that name — it is effectively dead for this purpose.
+#       * gemini / anthropic: IGNORED entirely.
+#       * local: IGNORED — the local (llama.cpp) provider uses LLAMACPP_HOST
+#         instead (see agent-local-llamacpp.yaml).
+#   - skipVerifySSL:
+#       * honored by openai, anthropic, azure-openai, local.
+#       * IGNORED by gemini.
+#   - apiKey / baseURL / apiVersion / projectId (other Agent.spec.config
+#     fields, if present in your CRD version): NEVER read by the executor
+#     for any provider today — credentials always come from the
+#     agent-executor pod's process environment (os.Getenv), not from
+#     Agent.spec.config.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: azure-proxy-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: azure-openai
+  modelName: gpt-4o
+  config:
+    # Honored: overrides AZURE_OPENAI_ENDPOINT for the azopenai provider.
+    # The scheme is forced to https no matter what is written here.
+    endpoint: "https://my-aoai.internal.example.com"
+    skipVerifySSL: "true"
+  outputExtraction:
+    type: text
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: openai-proxy-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: openai
+  modelName: gpt-4o
+  config:
+    # skipVerifySSL is honored for openai. endpoint would be ignored here —
+    # deliberately omitted; see the working alternative below.
+    skipVerifySSL: "true"
+  # To point the openai provider at a proxy/custom base URL, config.endpoint
+  # will NOT work. Instead set OPENAI_ENDPOINT or OPENAI_API_BASE on the
+  # agent-executor pod via Helm:
+  #   helm upgrade --install ottoflow charts/ottoflow \
+  #     --namespace ottoflow \
+  #     --set-json 'agentExecutor.env=[{"name":"OPENAI_API_BASE","value":"https://my-openai-proxy.internal.example.com/v1"}]'
+  # NOTE: OPENAI_BASE_URL is listed in ottoflow's LLMEnvAllowlist but is
+  # dead for this purpose — gollm's openai provider never reads that name.
+  outputExtraction:
+    type: text
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-custom-endpoint-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (azure-openai provider via custom endpoint)"
+      agentRef:
+        name: azure-proxy-agent
+        additionalPrompts:
+          - 'inputs.question'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Step outputs land in the shared `variables` map, hence variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-custom-endpoint-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-custom-endpoint-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"

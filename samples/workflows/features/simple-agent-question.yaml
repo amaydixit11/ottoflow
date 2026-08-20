@@ -1,0 +1,35 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: simple-agent-question
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask the AI agent"
+      required: true
+  steps:
+    - name: askAgent
+      message: "Ask AI agent a question"
+      agentRef:
+        name: simple-agent
+        # Add additional prompt with the actual question using CEL expression
+        additionalPrompts:
+          - format("Answer the following question:\n\n%s\n\nProvide a clear, concise answer.", inputs.question)
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  outputs:
+    - name: final-answer
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: simple-agent-question-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: simple-agent-question
+  inputValues:
+    question: "What are the key benefits of using Kubernetes?"

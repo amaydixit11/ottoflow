@@ -1,0 +1,237 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agents.ottoflow.nirmata.io
+spec:
+  group: ottoflow.nirmata.io
+  names:
+    kind: Agent
+    listKind: AgentList
+    plural: agents
+    shortNames:
+    - agent
+    singular: agent
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Agent is the Schema for the agents API
+          Agent defines a reusable AI agent configuration for workflow steps
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AgentSpec defines the desired state of Agent
+            properties:
+              config:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Config contains provider-specific client options. The executor reads exactly
+                  two keys (internal/agent/default_executor.go):
+
+                  - endpoint: custom base URL passed to gollm as ClientOptions.URL; with the pinned
+                  gollm honored ONLY by modelProvider "azure-openai" (overrides AZURE_OPENAI_ENDPOINT);
+                  "openai" reads OPENAI_ENDPOINT/OPENAI_API_BASE from the process environment instead;
+                  "google", "gemini" and "anthropic" ignore it; "local" uses LLAMACPP_HOST.
+                  - skipVerifySSL: "true" disables TLS verification; honored by openai, anthropic,
+                  azure-openai and local.
+
+                  API keys are NOT read from here; they come from the agent-executor process
+                  environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AZURE_OPENAI_API_KEY).
+                type: object
+              executorImage:
+                description: |-
+                  ExecutorImage is a custom container image for agent execution
+                  If not specified, uses the default executor image (ghcr.io/nirmata/ottoflow/agent-executor:latest)
+                type: string
+              mcpTools:
+                description: |-
+                  MCPTools is a list of MCP tools the agent can use
+                  Each tool is specified as "server:tool" (e.g., "kubernetes-mcp:get-resource")
+                items:
+                  type: string
+                type: array
+              modelName:
+                description: |-
+                  ModelName is the specific model to use (e.g., "gpt-4", "claude-3-opus")
+                  Default depends on provider
+                type: string
+              modelProvider:
+                description: |-
+                  ModelProvider is the LLM provider to use. This field is required.
+                  Options: nirmata, openai, anthropic, azure-openai, google, gemini, local
+                enum:
+                - nirmata
+                - openai
+                - anthropic
+                - azure-openai
+                - google
+                - gemini
+                - local
+                type: string
+              outputExtraction:
+                description: OutputExtraction defines how to extract outputs from
+                  agent responses
+                properties:
+                  pattern:
+                    description: |-
+                      Pattern is the extraction pattern
+                      For json: JSONPath expression (e.g., "$.result.recommendations"). A pattern that
+                        matches nothing fails the step. Omit to return the whole JSON object.
+                      For regex: Regular expression with capture groups
+                      For text: unused - the full response is always returned. Use type regex to select
+                        a substring.
+                    type: string
+                  schema:
+                    description: |-
+                      Schema defines the expected output schema (for JSON extraction)
+                      Stored as raw JSON bytes
+                    format: byte
+                    type: string
+                  type:
+                    default: json
+                    description: |-
+                      Type is the extraction method
+                      Options: json, regex, text
+                    enum:
+                    - json
+                    - regex
+                    - text
+                    type: string
+                type: object
+              prompt:
+                description: |-
+                  Prompt is the system prompt for the agent
+                  This is a static prompt that defines the agent's role and base instructions
+                  For dynamic content, use additionalPrompts in the workflow step's agentRef
+                type: string
+              resources:
+                description: |-
+                  Resources defines resource requests/limits for agent execution
+                  Currently used for future sandbox mode
+                  All steps using this agent use these resources
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              serviceAccount:
+                description: |-
+                  ServiceAccount is the Kubernetes service account to use for agent execution
+                  Used for RBAC and authentication
+                type: string
+              serviceName:
+                description: |-
+                  ServiceName is the name of the AgentExecutor Service
+                  If not specified, uses default: ottoflow-agent-executor
+                type: string
+              serviceNamespace:
+                description: |-
+                  ServiceNamespace is the namespace of the AgentExecutor Service
+                  Defaults to ottoflow
+                type: string
+            required:
+            - modelProvider
+            - prompt
+            type: object
+          status:
+            description: AgentStatus defines the observed state of Agent
+            properties:
+              lastChecked:
+                description: LastChecked is when the agent configuration was last
+                  validated
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional information about the agent
+                  status
+                type: string
+              phase:
+                allOf:
+                - enum:
+                  - Ready
+                  - NotReady
+                - enum:
+                  - Ready
+                  - NotReady
+                description: Phase represents the current phase of the Agent
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

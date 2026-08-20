@@ -1,0 +1,14 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: test-time
+  namespace: ottoflow
+spec:
+  steps:
+    - name: testNow
+      expressions:
+        - name: now
+          expression: 'time.now()'
+      outputs:
+        - name: result
+          expression: 'expressions.now'

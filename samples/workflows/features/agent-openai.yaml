@@ -1,0 +1,72 @@
+# Agent step using the OpenAI provider.
+#
+# Credential mechanism (verified against source, not assumed):
+#   - gollm's openai provider reads its API key from the OPENAI_API_KEY
+#     process environment variable INSIDE the agent-executor pod, via
+#     os.Getenv. It is NOT read from Agent.spec.config, and WorkflowRun
+#     credentials never reach this pod — see README.md, "LLM providers and
+#     credentials", for why.
+#   - Set it on the agent-executor pod via the Helm chart's
+#     `agentExecutor.env`
+#     (charts/ottoflow/templates/agent-executor-deployment.yaml), which
+#     accepts a Kubernetes-style env list including secretKeyRef.
+#
+# One-time setup:
+#   kubectl create secret generic llm-credentials \
+#     --namespace ottoflow \
+#     --from-literal=openai-api-key='sk-...'
+#
+#   helm upgrade --install ottoflow charts/ottoflow \
+#     --namespace ottoflow \
+#     --set-json 'agentExecutor.env=[{"name":"OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"llm-credentials","key":"openai-api-key"}}}]'
+#
+# CLI local mode (`ottoflow run --workflow-dir ...`) runs in-process and picks
+# up OPENAI_API_KEY from your shell environment instead — no Helm/Secret:
+#   export OPENAI_API_KEY='sk-...'
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-openai-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (OpenAI provider)"
+      agentRef:
+        name: openai-agent
+        additionalPrompts:
+          - 'format("Question: %s", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Step outputs land in the shared `variables` map, hence variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-openai-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-openai-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: openai-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: openai
+  modelName: gpt-4o
+  outputExtraction:
+    type: text

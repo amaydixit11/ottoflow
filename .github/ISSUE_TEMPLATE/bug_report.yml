@@ -1,0 +1,36 @@
+name: Bug Report
+description: Report a problem with OttoFlow
+labels: ["kind/bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal Workflow/WorkflowRun YAML if possible.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OttoFlow version
+      placeholder: e.g. v0.8.0, or commit SHA if built from source
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes version, install method (Helm/from source), cloud provider if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Controller/workflow-runner/agent-executor logs, WorkflowRun status, etc.
+      render: shell

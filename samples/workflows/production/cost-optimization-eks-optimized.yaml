@@ -1,0 +1,697 @@
+# Cost Optimization Daily Report — Optimized
+#
+# This is a refactored version of cost-optimization.yaml that reduces
+# CEL complexity by:
+#   1. Extracting per-namespace collection into a StepTemplate
+#   2. Using resourceQuery for declarative resource fetching
+#   3. Passing raw JSON to the LLM agent (no format() chains)
+#   4. Using new CEL helpers: podTotalCPURequest, podTotalMemRequest,
+#      nodeCapacityCPU, nodeCapacityMemory, nodeAllocatableCPU, nodeAllocatableMemory
+#   5. Pre-computing typed constants as workflow variables
+#
+# Prerequisites:
+#   - Prometheus with cAdvisor metrics
+#   - AWS IAM permissions: pricing:*
+#   - StepTemplate: samples/steptemplates/cost-namespace-collector.yaml
+#
+# Run:
+#   ottoflow run samples/workflows/production/cost-optimization-eks-optimized.yaml \
+#     --prometheus-url http://localhost:9090 \
+#     --input awsRegion=us-west-2
+#
+# ════════════════════════════════════════════════════════════════
+# ConfigMap: Persists state across runs for trend analysis.
+# ════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-optimization-state
+  namespace: ottoflow
+  labels:
+    app.kubernetes.io/managed-by: ottoflow
+    ottoflow.nirmata.io/workflow: cost-daily-report
+data: {}
+---
+# ════════════════════════════════════════════════════════════════
+# Workflow
+# ════════════════════════════════════════════════════════════════
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: cost-daily-report
+  namespace: ottoflow
+  annotations:
+    description: >-
+      Optimized multi-namespace cost optimization report.
+      Uses StepTemplate for per-namespace fan-out, CEL helper functions
+      for resource extraction, and delegates formatting to the LLM agent.
+spec:
+  inputs:
+    - name: namespace
+      description: "Target namespace (leave empty for all non-system namespaces)"
+    - name: awsRegion
+      description: "AWS region for pricing lookups"
+      default: "us-east-1"
+    - name: cpuCostPerCore
+      description: "Fallback monthly cost per vCPU if AWS pricing unavailable"
+      default: "31.0"
+    - name: memoryCostPerGB
+      description: "Fallback monthly cost per GB RAM if AWS pricing unavailable"
+      default: "3.5"
+    - name: overProvisionThreshold
+      description: "P99 utilization ratio below which a pod is over-provisioned (0.0-1.0)"
+      default: "0.3"
+    - name: prometheusLookbackDays
+      description: "Days of Prometheus history for P95/P99"
+      default: "7"
+    - name: slackWebhookUrl
+      description: "Slack webhook URL (leave empty to skip)"
+
+  variables:
+    - name: threshold
+      expression: 'double(inputs.overProvisionThreshold)'
+    - name: lookbackRange
+      expression: 'inputs.prometheusLookbackDays + "d"'
+
+  # Uncomment for daily scheduled runs:
+  # triggers:
+  #   - cron:
+  #       schedule: "0 6 * * *"
+  #       timezone: "America/Los_Angeles"
+  #       concurrencyPolicy: "Forbid"
+
+  steps:
+    # ── Phase 1: Parallel initialization ───────────────────────
+
+    - name: listNamespaces
+      message: "Determine which namespaces to analyze"
+      resourceQuery:
+        apiVersion: v1
+        resource: Namespace
+        outputs:
+          namespaces: >-
+            has(inputs.namespace) && inputs.namespace != ""
+              ? [inputs.namespace]
+              : items.map(ns, ns.metadata.name).filter(ns, !ns.startsWith("kube-"))
+
+    - name: loadHistory
+      message: "Load previous run state for trend analysis (safe on first run)"
+      failurePolicy: Continue
+      resourceQuery:
+        apiVersion: v1
+        resource: ConfigMap
+        namespace: '"ottoflow"'
+        name: '"cost-optimization-state"'
+        outputs:
+          hasPreviousRun: >-
+            object.?data.lastRunTime.orValue("") != ""
+          previousRunTime: >-
+            object.?data.lastRunTime.orValue("")
+          previousNamespaceCount: >-
+            object.?data.namespacesAnalyzed.orValue("0")
+          previousOverProvisioned: >-
+            object.?data.totalOverProvisioned.orValue("0")
+          previousPodsAnalyzed: >-
+            object.?data.totalPodsAnalyzed.orValue("0")
+          previousReportExcerpt: >-
+            object.?data.reportExcerpt.orValue("")
+
+    # ── Phase 2: Parallel data collection ──────────────────────
+
+    - name: collectPerNamespace
+      message: "Fan out per-namespace data collection via StepTemplate"
+      dependsOn:
+        - listNamespaces
+      forEach:
+        items: 'variables.namespaces'
+        itemVariable: "ns"
+        maxConcurrency: 5
+        itemFailurePolicy: Continue
+        stepTemplateRef:
+          name: cost-namespace-collector
+          namespace: ottoflow
+          arguments:
+            namespace: 'variables.ns'
+            overProvisionThreshold: 'inputs.overProvisionThreshold'
+            prometheusLookbackDays: 'inputs.prometheusLookbackDays'
+      outputs:
+        - name: namespaceResults
+          expression: 'steps.collectPerNamespace.succeeded'
+        - name: namespacesAnalyzed
+          expression: 'size(steps.collectPerNamespace.succeeded)'
+        - name: namespaceFailed
+          expression: 'size(steps.collectPerNamespace.failed)'
+
+    - name: extractNodeInfo
+      message: "Extract node capacity, allocatable resources, and instance types"
+      dependsOn:
+        - listNamespaces
+      expressions:
+        - name: nodes
+          expression: 'dyn(resource.List("v1", "Node", "", {})).items'
+        - name: instanceTypes
+          expression: >-
+            expressions.nodes
+              .filter(n, has(n.metadata.labels) && "node.kubernetes.io/instance-type" in n.metadata.labels)
+              .map(n, n.metadata.labels["node.kubernetes.io/instance-type"])
+              .distinct()
+        - name: nodeRegions
+          expression: >-
+            expressions.nodes
+              .filter(n, has(n.metadata.labels) && "topology.kubernetes.io/region" in n.metadata.labels)
+              .map(n, n.metadata.labels["topology.kubernetes.io/region"])
+              .distinct()
+        - name: totalNodeCPU
+          expression: 'expressions.nodes.map(n, nodeCapacityCPU(n)).sum()'
+        - name: totalNodeMemBytes
+          expression: 'expressions.nodes.map(n, nodeCapacityMemory(n)).sum()'
+        - name: allocatableCPU
+          expression: 'expressions.nodes.map(n, nodeAllocatableCPU(n)).sum()'
+        - name: allocatableMemBytes
+          expression: 'expressions.nodes.map(n, nodeAllocatableMemory(n)).sum()'
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", "", {})).items'
+        - name: clusterCPURequests
+          expression: 'expressions.allPods.map(p, podTotalCPURequest(p)).sum()'
+        - name: clusterMemRequests
+          expression: 'expressions.allPods.map(p, podTotalMemRequest(p)).sum()'
+      outputs:
+        - name: instanceTypes
+          expression: 'expressions.instanceTypes'
+        - name: nodeRegion
+          expression: 'size(expressions.nodeRegions) > 0 ? expressions.nodeRegions[0] : inputs.awsRegion'
+        - name: clusterUtilization
+          value:
+            totalNodes: size(expressions.nodes)
+            totalPods: size(expressions.allPods)
+            capacityCPU: format("%.2f cores", expressions.totalNodeCPU)
+            capacityMemory: format("%.2f GB", expressions.totalNodeMemBytes / 1073741824.0)
+            allocatableCPU: format("%.2f cores", expressions.allocatableCPU)
+            allocatableMemory: format("%.2f GB", expressions.allocatableMemBytes / 1073741824.0)
+            cpuRequestsTotal: format("%.2f cores", expressions.clusterCPURequests)
+            memoryRequestsTotal: format("%.2f GB", expressions.clusterMemRequests / 1073741824.0)
+            cpuUtilizationPct: >-
+              expressions.allocatableCPU > 0.0
+                ? format("%.1f%%", (expressions.clusterCPURequests / expressions.allocatableCPU) * 100.0)
+                : "N/A"
+            memoryUtilizationPct: >-
+              expressions.allocatableMemBytes > 0.0
+                ? format("%.1f%%", (expressions.clusterMemRequests / expressions.allocatableMemBytes) * 100.0)
+                : "N/A"
+
+    - name: fetchEC2Pricing
+      message: "Fetch on-demand EC2 pricing from AWS Price List API"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEC2"'
+          region: 'variables.nodeRegion'
+          filters: >-
+            [{"Field": "tenancy", "Value": "Shared", "Type": "TERM_MATCH"},
+             {"Field": "operatingSystem", "Value": "Linux", "Type": "TERM_MATCH"},
+             {"Field": "preInstalledSw", "Value": "NA", "Type": "TERM_MATCH"},
+             {"Field": "capacitystatus", "Value": "Used", "Type": "TERM_MATCH"}]
+          output_options: '{"pricing_terms": ["OnDemand"], "product_attributes": ["instanceType", "vcpu", "memory", "location"]}'
+      outputs:
+        - name: ec2PricingData
+          expression: 'toolResult'
+
+    - name: fetchEKSPricing
+      message: "Fetch EKS pricing from AWS Price List API"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEKS"'
+          region: 'variables.nodeRegion'
+      outputs:
+        - name: eksPricingData
+          expression: 'toolResult'
+
+    # ── Phase 3: Aggregate totals and generate report ──────────
+
+    - name: aggregateResults
+      message: "Compute aggregate totals from per-namespace results"
+      dependsOn:
+        - collectPerNamespace
+      expressions:
+        - name: totalPodsAnalyzed
+          expression: >-
+            variables.namespaceResults.map(r, int(r.?outputs.podsAnalyzed.orValue(0))).sum()
+        - name: totalOverProvisioned
+          expression: >-
+            variables.namespaceResults.map(r, int(r.?outputs.overProvisionedCount.orValue(0))).sum()
+      outputs:
+        - name: totalPodsAnalyzed
+          expression: 'expressions.totalPodsAnalyzed'
+        - name: totalOverProvisioned
+          expression: 'expressions.totalOverProvisioned'
+
+    - name: generateReport
+      message: "LLM agent analyzes raw data and produces executive report"
+      dependsOn:
+        - aggregateResults
+        - loadHistory
+        - fetchEC2Pricing
+        - fetchEKSPricing
+        - extractNodeInfo
+        - collectPerNamespace
+      agentRef:
+        name: cost-analyst-agent
+        additionalPrompts:
+          - >-
+            variables.?hasPreviousRun.orValue(false) == true
+              ? format(
+                  "## TREND CONTEXT (compare against previous run)\n" +
+                  "Previous run: %s\n" +
+                  "Previous namespaces analyzed: %s\n" +
+                  "Previous pods analyzed: %s\n" +
+                  "Previous over-provisioned pods: %s\n" +
+                  "Previous report excerpt:\n%s\n\n" +
+                  "IMPORTANT: Compare current metrics against the previous run. " +
+                  "Highlight what improved, what regressed, and what is unchanged. " +
+                  "Calculate percentage changes where possible.\n\n",
+                  variables.?previousRunTime.orValue("unknown"),
+                  variables.?previousNamespaceCount.orValue("0"),
+                  variables.?previousPodsAnalyzed.orValue("0"),
+                  variables.?previousOverProvisioned.orValue("0"),
+                  variables.?previousReportExcerpt.orValue("(none)")
+                )
+              : "This is the FIRST run. No previous data is available. " +
+                "Establish a baseline. Do NOT fabricate trends or comparisons. " +
+                "Focus on current state analysis and identifying immediate opportunities.\n\n"
+          - >-
+            format(
+              "## CURRENT ANALYSIS\n" +
+              "Namespaces analyzed: %d (failed: %d)\n" +
+              "Total pods analyzed: %d\n" +
+              "Total over-provisioned pods: %d\n" +
+              "Lookback window: %s days\n" +
+              "Over-provision threshold: P99 utilization < %s\n\n" +
+              "## CLUSTER UTILIZATION\n%v\n\n",
+              int(variables.namespacesAnalyzed),
+              int(variables.namespaceFailed),
+              int(variables.totalPodsAnalyzed),
+              int(variables.totalOverProvisioned),
+              inputs.prometheusLookbackDays,
+              inputs.overProvisionThreshold,
+              variables.clusterUtilization
+            )
+          - >-
+            format(
+              "## PER-NAMESPACE RESULTS (structured data — pod-level metrics, waste indicators, over-provisioned details)\n%v",
+              variables.namespaceResults
+            )
+          - >-
+            format(
+              "## AWS PRICING (real-time from AWS Price List API)\n" +
+              "Region: %s\n" +
+              "Node Instance Types: %v\n\n" +
+              "### EC2 On-Demand Pricing\n%v\n\n" +
+              "### EKS Pricing\n%v\n\n" +
+              "Fallback costs (use only if AWS pricing above is empty): $%s/core/month, $%s/GB/month.\n\n",
+              variables.nodeRegion,
+              variables.instanceTypes,
+              variables.ec2PricingData,
+              variables.eksPricingData,
+              inputs.cpuCostPerCore,
+              inputs.memoryCostPerGB
+            )
+          - >-
+            "Structure your report with these sections:\n\n" +
+            "1. **Executive Summary** — headline savings number, key findings\n\n" +
+            "2. **Top 10 Namespaces by Cost Optimization Potential**\n" +
+            "   Produce a markdown table with columns: Rank, Namespace, Pods, Over-Prov Pods, " +
+            "Est. Monthly Savings, Waste Issues, Confidence, Top Action.\n" +
+            "   Rank namespaces by estimated monthly savings (highest first). " +
+            "Compute savings from over-provisioned CPU/memory using the AWS per-vCPU and per-GB costs. " +
+            "Waste Issues = idle deployments + orphan PVCs + best-effort pods + missing-limits pods. " +
+            "Top Action = the single highest-impact recommendation for that namespace. " +
+            "Show up to 10 rows; omit namespaces with zero optimization potential.\n\n" +
+            "3. **Trend Analysis** — comparison with previous run (if available), week-over-week changes\n" +
+            "4. **Methodology** — P95/P99 percentile analysis over lookback window\n" +
+            "5. **AWS Pricing Context** — instance types, rates, per-vCPU and per-GB costs\n" +
+            "6. **Right-Sizing Recommendations** — prioritized by dollar impact, include per-pod details\n" +
+            "7. **Waste Cleanup Opportunities** — idle deployments, orphan PVCs, missing limits\n" +
+            "8. **Anti-Pattern Alerts** — BestEffort pods, missing limits, :latest tags\n" +
+            "9. **Cluster Utilization Summary** — capacity vs requests\n" +
+            "10. **Reserved Instance / Savings Plan Opportunities**\n" +
+            "11. **Recommended Next Steps** — concrete actions for this week\n\n" +
+            "For each right-sizing recommendation:\n" +
+            "- Calculate recommended = max(P99 * 1.3, P95 * 1.5, current * 0.25)\n" +
+            "- Assign confidence: HIGH if P99 is stable, MEDIUM if bursty, LOW if insufficient data\n" +
+            "- Calculate dollar savings using the AWS pricing data\n" +
+            "- NEVER recommend automatic changes. Always recommend human review first."
+      outputs:
+        - name: report
+          expression: 'agentResponse'
+
+    # ── Phase 4: Persist state and notify ──────────────────────
+
+    - name: persistState
+      message: "Save current run metrics to ConfigMap for next run's trend analysis"
+      dependsOn:
+        - generateReport
+        - aggregateResults
+        - collectPerNamespace
+      failurePolicy: Continue
+      mutate:
+        target:
+          apiVersion: "v1"
+          resource: "ConfigMap"
+          namespace: '"ottoflow"'
+          name: '"cost-optimization-state"'
+        patchType: ApplyConfiguration
+        applyConfiguration:
+          expression: >-
+            {
+              "data": {
+                "lastRunTime": string(time.now()),
+                "namespacesAnalyzed": string(variables.namespacesAnalyzed),
+                "totalPodsAnalyzed": string(variables.totalPodsAnalyzed),
+                "totalOverProvisioned": string(variables.totalOverProvisioned),
+                "reportExcerpt": size(string(variables.report)) > 3000
+                  ? string(variables.report).substring(0, 3000)
+                  : string(variables.report)
+              }
+            }
+
+    - name: notifySlack
+      message: "Send summary to Slack"
+      dependsOn:
+        - generateReport
+        - aggregateResults
+        - collectPerNamespace
+      matchConditions:
+        - name: slackConfigured
+          expression: 'has(inputs.slackWebhookUrl) && inputs.slackWebhookUrl != ""'
+      expressions:
+        - name: trendNote
+          expression: >-
+            variables.?hasPreviousRun.orValue(false) == true
+              ? format(" | Previous: %s over-provisioned", variables.?previousOverProvisioned.orValue("?"))
+              : " | First run (baseline)"
+        - name: slackText
+          expression: >-
+            format(
+              '*Daily Cost Optimization Report*\n\n' +
+              'Namespaces: %d | Pods analyzed: %d | Over-provisioned: %d%s\n' +
+              '_Based on P95/P99 Prometheus metrics over %s days + real-time AWS pricing._',
+              int(variables.namespacesAnalyzed),
+              int(variables.totalPodsAnalyzed),
+              int(variables.totalOverProvisioned),
+              expressions.trendNote,
+              inputs.prometheusLookbackDays
+            )
+        - name: slackResult
+          expression: >-
+            http.Post(inputs.slackWebhookUrl, {"text": expressions.slackText}, {"Content-Type": "application/json"})
+      outputs:
+        # http.Post returns non-2xx as data, not an error — check status explicitly.
+        - name: slackNotified
+          expression: 'expressions.slackResult.statusCode >= 200 && expressions.slackResult.statusCode < 300'
+
+  outputs:
+    - name: report
+      expression: 'variables.report'
+    - name: namespacesAnalyzed
+      expression: 'variables.namespacesAnalyzed'
+    - name: totalPodsAnalyzed
+      expression: 'variables.totalPodsAnalyzed'
+    - name: totalOverProvisioned
+      expression: 'variables.totalOverProvisioned'
+    - name: clusterUtilization
+      expression: 'variables.clusterUtilization'
+---
+# ════════════════════════════════════════════════════════════════
+# Agent: Does the actual analysis, recommendations, and reporting
+# ════════════════════════════════════════════════════════════════
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: cost-analyst-agent
+  namespace: ottoflow
+spec:
+  modelProvider: anthropic
+  prompt: |
+    You are a Kubernetes FinOps analyst specializing in cost optimization and resource efficiency.
+
+    Your role is to analyze per-namespace resource data together with real-time AWS pricing
+    and produce an executive cost optimization report.
+
+    The data you receive includes raw JSON with pod-level metrics (P95/P99 CPU and memory
+    utilization), resource requests, waste indicators, and over-provisioned pod details for
+    each namespace. Parse this structured data to compute savings and rank namespaces.
+
+    The metrics are based on Prometheus P95/P99 percentiles collected over a multi-day
+    lookback window — NOT a single point-in-time snapshot. This means the recommendations
+    account for workload variability and burst patterns.
+
+    For right-sizing recommendations, use this formula:
+      recommended = max(P99 * 1.3, P95 * 1.5, currentRequest * 25%)
+    Assign confidence levels:
+      HIGH: stable workload (safe to act on)
+      MEDIUM: bursty workload (monitor before acting)
+      LOW: insufficient data (defer action)
+
+    Use the real-time AWS pricing data to:
+    - Map each node instance type to its actual on-demand hourly rate
+    - Derive accurate per-vCPU and per-GB-memory costs
+    - Calculate monthly costs using: hourly_rate * 730 hours/month
+    - Highlight Reserved Instance or Savings Plan opportunities
+
+    If trend data from a previous run is provided, compare current vs previous metrics.
+    Calculate percentage changes and highlight improvements and regressions.
+    If this is the first run, clearly state that no trend data is available.
+
+    Key principles:
+    - Lead with the projected monthly savings as the headline number
+    - Prioritize recommendations by dollar impact (highest first)
+    - Include per-pod details for each right-sizing recommendation
+    - NEVER recommend automatically applying changes; always recommend human review
+    - For MEDIUM/LOW confidence items, suggest extending the monitoring window
+    - End with concrete next steps the team can take this week
+  outputExtraction:
+    type: text
+---
+# ════════════════════════════════════════════════════════════════
+# StepTemplate: Per-namespace cost data collector
+# (loaded from samples/steptemplates/cost-namespace-collector.yaml)
+# ════════════════════════════════════════════════════════════════
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: cost-namespace-collector
+  namespace: ottoflow
+spec:
+  description: >-
+    Collects per-namespace cost optimization data: pod specs, Prometheus P95/P99
+    metrics, over-provisioned pods, and waste indicators.
+  parameters:
+    - name: namespace
+      description: "Target namespace to analyze"
+      required: true
+    - name: overProvisionThreshold
+      description: "P99 utilization ratio below which a pod is over-provisioned"
+      default: '"0.3"'
+    - name: prometheusLookbackDays
+      description: "Days of Prometheus history for P95/P99"
+      default: '"7"'
+  step:
+    message: "Collect cost data for namespace {{.namespace}}"
+    expressions:
+      - name: pods
+        expression: 'dyn(resource.List("v1", "Pod", "{{.namespace}}", {})).items'
+      - name: deployments
+        expression: 'dyn(resource.List("apps/v1", "Deployment", "{{.namespace}}", {})).items'
+      - name: hpas
+        expression: 'dyn(resource.List("autoscaling/v2", "HorizontalPodAutoscaler", "{{.namespace}}", {})).items'
+      - name: pvcs
+        expression: 'dyn(resource.List("v1", "PersistentVolumeClaim", "{{.namespace}}", {})).items'
+      - name: nsFilter
+        expression: '"namespace=\"{{.namespace}}\","'
+      - name: lookback
+        expression: '"{{.prometheusLookbackDays}}" + "d"'
+      - name: p95CpuResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p99CpuResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p95MemResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.95, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p99MemResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.99, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p95CpuSamples
+        expression: 'expressions.?p95CpuResult.samples.orValue([])'
+      - name: p99CpuSamples
+        expression: 'expressions.?p99CpuResult.samples.orValue([])'
+      - name: p95MemSamples
+        expression: 'expressions.?p95MemResult.samples.orValue([])'
+      - name: p99MemSamples
+        expression: 'expressions.?p99MemResult.samples.orValue([])'
+      - name: podIds
+        expression: >-
+          expressions.p95CpuSamples
+            .map(s, s.metric.namespace + "/" + s.metric.pod)
+            .distinct()
+      - name: podMetrics
+        expression: >-
+          expressions.podIds.map(pid, {
+            "podId": dyn(pid),
+            "p95CpuCores": dyn(expressions.p95CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p99CpuCores": dyn(expressions.p99CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p95MemBytes": dyn(expressions.p95MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p99MemBytes": dyn(expressions.p99MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "requestedCPUCores": dyn(expressions.pods
+              .filter(p, p.metadata.namespace + "/" + p.metadata.name == pid)
+              .map(p, podTotalCPURequest(p)).sum()),
+            "requestedMemBytes": dyn(expressions.pods
+              .filter(p, p.metadata.namespace + "/" + p.metadata.name == pid)
+              .map(p, podTotalMemRequest(p)).sum())
+          }).filter(pm, pm.requestedCPUCores > 0.0 || pm.requestedMemBytes > 0.0)
+      - name: overProvisionedPods
+        expression: >-
+          expressions.podMetrics.filter(pm,
+            (pm.requestedCPUCores > 0.0 && pm.p99CpuCores > 0.0
+              && (pm.p99CpuCores / pm.requestedCPUCores) < double("{{.overProvisionThreshold}}"))
+            || (pm.requestedMemBytes > 0.0 && pm.p99MemBytes > 0.0
+              && (pm.p99MemBytes / pm.requestedMemBytes) < double("{{.overProvisionThreshold}}"))
+          )
+      - name: idleDeployments
+        expression: >-
+          expressions.deployments
+            .filter(d, has(d.spec) && has(d.spec.replicas) && d.spec.replicas == 0)
+            .map(d, d.metadata.name)
+      - name: bestEffortPods
+        expression: >-
+          expressions.pods.filter(p,
+            has(p.spec.containers) &&
+            !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))
+          ).map(p, p.metadata.name)
+      - name: noLimitsPods
+        expression: >-
+          expressions.pods.filter(p,
+            has(p.spec.containers) &&
+            p.spec.containers.exists(c, !has(c.resources) || !has(c.resources.limits))
+          ).map(p, p.metadata.name)
+      - name: hpaTargets
+        expression: 'expressions.hpas.map(h, h.spec.scaleTargetRef.name)'
+      - name: deploymentsWithoutHPA
+        expression: >-
+          expressions.deployments
+            .filter(d, has(d.spec.replicas) && d.spec.replicas > 1
+              && !expressions.hpaTargets.exists(t, t == d.metadata.name))
+            .map(d, format("%s (replicas: %d)", d.metadata.name, d.spec.replicas))
+      - name: mountedPVCNames
+        expression: >-
+          expressions.pods
+            .filter(p, has(p.spec.volumes))
+            .map(p, p.spec.volumes.filter(v, has(v.persistentVolumeClaim)).map(v, v.persistentVolumeClaim.claimName))
+            .flatten().distinct()
+      - name: orphanPVCs
+        expression: >-
+          expressions.pvcs
+            .filter(pvc, has(pvc.status) && has(pvc.status.phase) && pvc.status.phase == "Bound")
+            .filter(pvc, !expressions.mountedPVCNames.exists(m, m == pvc.metadata.name))
+            .map(pvc, pvc.metadata.name)
+      - name: totalCPURequests
+        expression: 'expressions.pods.map(p, podTotalCPURequest(p)).sum()'
+      - name: totalMemRequests
+        expression: 'expressions.pods.map(p, podTotalMemRequest(p)).sum()'
+    outputs:
+      - name: namespace
+        expression: 'variables.ns'
+      - name: podCount
+        expression: 'size(expressions.pods)'
+      - name: podsAnalyzed
+        expression: 'size(expressions.podMetrics)'
+      - name: overProvisionedPods
+        expression: 'expressions.overProvisionedPods'
+      - name: overProvisionedCount
+        expression: 'size(expressions.overProvisionedPods)'
+      - name: totalCPURequestsCores
+        expression: 'expressions.totalCPURequests'
+      - name: totalMemRequestsGB
+        expression: 'expressions.totalMemRequests / 1073741824.0'
+      - name: wasteReport
+        value:
+          idleDeployments: expressions.idleDeployments
+          idleDeploymentCount: size(expressions.idleDeployments)
+          bestEffortPodCount: size(expressions.bestEffortPods)
+          noLimitsPodCount: size(expressions.noLimitsPods)
+          orphanPVCs: expressions.orphanPVCs
+          orphanPVCCount: size(expressions.orphanPVCs)
+          deploymentsWithoutHPA: expressions.deploymentsWithoutHPA
+---
+# ════════════════════════════════════════════════════════════════
+# AWS credentials and MCP server for pricing API
+# ════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: ottoflow
+type: Opaque
+stringData:
+  access-key-id: "REPLACE_WITH_AWS_ACCESS_KEY_ID"
+  secret-access-key: "REPLACE_WITH_AWS_SECRET_ACCESS_KEY"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: aws-pricing-mcp
+  namespace: ottoflow
+spec:
+  transport:
+    type: stdio
+    command:
+      # Resolved from the controller PATH. Patch to an absolute path or use a
+      # container entrypoint if uvx is not on PATH in your environment.
+      - "uvx"
+      - "awslabs.aws-pricing-mcp-server@latest"
+  timeout: "60s"
+  auth:
+    type: none
+  env:
+    - name: FASTMCP_LOG_LEVEL
+      value: "ERROR"
+    - name: AWS_REGION
+      value: "us-east-1"
+    - name: AWS_PROFILE
+      value: "default"
+---
+# ════════════════════════════════════════════════════════════════
+# WorkflowRun: Trigger a single execution
+# ════════════════════════════════════════════════════════════════
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: cost-daily-report-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: cost-daily-report
+  inputValues:
+    awsRegion: "us-west-2"
+    overProvisionThreshold: "0.3"
+    prometheusLookbackDays: "7"

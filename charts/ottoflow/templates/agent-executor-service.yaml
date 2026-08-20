@@ -1,0 +1,22 @@
+{{- if .Values.agentExecutor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ottoflow.agentExecutor.fullname" . }}
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.agentExecutor.labels.n4" . }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.agentExecutor.service.type }}
+  ports:
+    - port: {{ .Values.agentExecutor.service.port }}
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "ottoflow.agentExecutor.selectorLabels.n4" . }}
+{{- end }}

@@ -1,0 +1,97 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: analysis-agent
+  namespace: ottoflow
+spec:
+  # Prompt can use CEL expressions to reference workflow context
+  # Use string concatenation to build dynamic prompts
+  prompt: |
+    You are an expert Kubernetes analyst. Analyze the provided deployment information
+    and provide recommendations for optimization.
+    
+    Provide recommendations for:
+    1. Resource optimization
+    2. High availability improvements
+    3. Security best practices
+    
+    Format your response as JSON with keys: recommendations, priority, and actionItems.
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  # modelName: ""  # Uses default model if not specified
+  outputExtraction:
+    type: json
+    pattern: "$.recommendations"
+  # serviceAccount: ""  # Optional: specify service account for RBAC
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: simple-agent
+  namespace: ottoflow
+spec:
+  # Simple prompt - can be extended at step level with additionalPrompts
+  prompt: |
+    You are a helpful assistant. Answer questions clearly and concisely.
+    
+    Provide a clear, concise answer.
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  outputExtraction:
+    type: text
+    # pattern: ""  # Optional: can be empty for text extraction
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: pod-diagnostics-agent
+  namespace: ottoflow
+spec:
+  prompt: |
+    You are a Kubernetes diagnostics expert. Analyze the provided pod information
+    and provide a comprehensive diagnostic report.
+    
+    Your analysis should include:
+    1. Health assessment (healthy, degraded, unhealthy)
+    2. Resource utilization analysis
+    3. Common issues identification (if any)
+    4. Recommendations for improvement
+    5. Potential security concerns
+    
+    Format your response as JSON with the following structure:
+    {
+      "health": "healthy|degraded|unhealthy",
+      "issues": ["issue1", "issue2"],
+      "recommendations": ["rec1", "rec2"],
+      "resourceAnalysis": {
+        "cpu": "adequate|high|low",
+        "memory": "adequate|high|low"
+      },
+      "securityConcerns": ["concern1", "concern2"]
+    }
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  outputExtraction:
+    type: json
+    pattern: "$"
+  # Optional: configure MCP tools for deeper analysis
+  # mcpTools:
+  #   - "kubernetes-mcp:get-logs"
+  #   - "kubernetes-mcp:describe-resource"

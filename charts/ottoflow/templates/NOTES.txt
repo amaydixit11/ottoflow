@@ -1,0 +1,13 @@
+OttoFlow has been installed. Create Workflows and WorkflowRuns to orchestrate agentic workflows.
+
+1. Verify the installation:
+  kubectl get deployments --namespace {{ include "ottoflow.namespace" . }}
+  kubectl get pods --namespace {{ include "ottoflow.namespace" . }}
+
+2. Check the controller logs:
+  kubectl logs --namespace {{ include "ottoflow.namespace" . }} deployment/{{ include "ottoflow.fullname" . }} --tail=50 -c manager
+
+3. Verify CRDs are installed:
+  kubectl get crds | grep ottoflow.nirmata.io
+
+For more information, visit: https://github.com/nirmata/ottoflow

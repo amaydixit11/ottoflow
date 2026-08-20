@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: ottoflow
+
+builds:
+  - id: ottoflow
+    main: ./cli
+    binary: ottoflow
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/nirmata/ottoflow/cli/cmd.version={{ .Version }}
+
+archives:
+  - id: ottoflow
+    formats:
+      - tar.gz
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  prerelease: auto
+
+brews:
+  - name: ottoflow
+    repository:
+      owner: nirmata
+      name: homebrew-tap
+      token: '{{ .Env.TAP_GITHUB_TOKEN }}'
+    # Formulas live at the tap repo root (see nctl.rb, kyverno-mcp.rb).
+    directory: .
+    homepage: https://github.com/nirmata/ottoflow
+    description: 'Kubernetes-native workflow engine CLI'
+    license: BUSL-1.1
+    # Don't publish formula updates for prerelease tags (e.g. v0.1.0-alpha1).
+    skip_upload: auto
+    commit_author:
+      name: nirmata-bot
+      email: bot@nirmata.com
+    commit_msg_template: 'Brew formula update for {{ .ProjectName }} version {{ .Tag }}'
+    test: |
+      system "#{bin}/ottoflow", "--help"
+    install: |
+      bin.install "ottoflow"

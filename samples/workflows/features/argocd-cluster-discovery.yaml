@@ -1,0 +1,121 @@
+# ArgoCD Cluster Discovery - Phase 1 Sample
+#
+# This workflow demonstrates listing managed clusters from ArgoCD and spawning
+# a sub-workflow per cluster. All execution runs on the Hub cluster.
+#
+# Prerequisites:
+# - OttoFlow installed on Hub cluster (where ArgoCD runs)
+# - ArgoCD installed with managed clusters registered
+# - OttoFlow RBAC: get, list on Secrets in argocd namespace with label
+#   argocd.argoproj.io/secret-type=cluster
+#
+# Usage: Create a WorkflowRun referencing argocd-cluster-discovery workflow.
+# Optional input: argocdNamespace (default: argocd)
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: argocd-cluster-discovery
+  namespace: ottoflow
+  annotations:
+    description: "List ArgoCD managed clusters and run a sub-workflow per cluster"
+spec:
+  inputs:
+    - name: argocdNamespace
+      description: "ArgoCD namespace (where cluster secrets live)"
+      default: "argocd"
+    - name: perClusterWorkflow
+      description: "Workflow to run per cluster (receives clusterName, clusterServer)"
+      default: "cluster-overview"
+
+  steps:
+    - name: listArgoCDClusters
+      message: "List ArgoCD managed cluster secrets"
+      resourceQuery:
+        apiVersion: "v1"
+        resource: "Secret"
+        namespace: "inputs.argocdNamespace"
+        labelSelector:
+          argocd.argoproj.io/secret-type: '"cluster"'
+        outputs:
+          clusterSecrets: "items"
+          clusterCount: "size(items)"
+
+    - name: extractClusterInfo
+      message: "Extract cluster info from secrets (metadata.name is always available)"
+      dependsOn:
+        - listArgoCDClusters
+      expressions:
+        # Use metadata.name as cluster identifier (ArgoCD secret names often = cluster name)
+        # For name/server from data, use: string(base64.decode(s.data["name"])) if base64 is available
+        - name: clusterNames
+          expression: "variables.clusterSecrets.map(s, s.metadata.name)"
+      outputs:
+        - name: clusterNames
+          expression: "expressions.clusterNames"
+
+    - name: summarize
+      message: "Summarize discovered clusters"
+      dependsOn:
+        - extractClusterInfo
+      expressions:
+        - name: summary
+          expression: >-
+            format("Discovered %d clusters: %s",
+              size(variables.clusterNames),
+              variables.clusterNames.join(", "))
+      outputs:
+        - name: summary
+          expression: "expressions.summary"
+
+  outputs:
+    - name: clusterCount
+      expression: "variables.clusterCount"
+    - name: clusterNames
+      expression: "variables.clusterNames"
+    - name: summary
+      expression: "variables.summary"
+
+---
+# Simpler workflow: just list cluster names (for use as sub-workflow or standalone)
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: argocd-list-clusters
+  namespace: ottoflow
+  annotations:
+    description: "List ArgoCD managed cluster names only"
+spec:
+  inputs:
+    - name: argocdNamespace
+      default: "argocd"
+
+  steps:
+    - name: getClusters
+      message: "Get ArgoCD cluster secrets"
+      resourceQuery:
+        apiVersion: "v1"
+        resource: "Secret"
+        namespace: "inputs.argocdNamespace"
+        labelSelector:
+          argocd.argoproj.io/secret-type: '"cluster"'
+        outputs:
+          items: "items"
+          count: "size(items)"
+
+    - name: formatOutput
+      message: "Format cluster list (using metadata.name as cluster identifier)"
+      dependsOn:
+        - getClusters
+      expressions:
+        - name: names
+          expression: "variables.items.map(s, s.metadata.name)"
+      outputs:
+        - name: clusterNames
+          expression: "expressions.names"
+
+  outputs:
+    - name: clusterCount
+      expression: "variables.count"
+    - name: clusterNames
+      expression: "variables.clusterNames"

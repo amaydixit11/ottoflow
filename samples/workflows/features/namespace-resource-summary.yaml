@@ -1,0 +1,60 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: namespace-resource-summary
+  namespace: ottoflow
+spec:
+  steps:
+    - name: getResources
+      message: "Get all resources by namespace"
+      expressions:
+        - name: pods
+          expression: 'resource.List("v1", "Pod", "", {}).items'
+        - name: deployments
+          expression: 'resource.List("apps/v1", "Deployment", "", {}).items'
+        - name: services
+          expression: 'resource.List("v1", "Service", "", {}).items'
+        - name: namespaces
+          expression: 'resource.List("v1", "Namespace", "", {}).items'
+      outputs:
+        - name: pods
+          expression: 'expressions.pods'
+        - name: deployments
+          expression: 'expressions.deployments'
+        - name: services
+          expression: 'expressions.services'
+        - name: namespaces
+          expression: 'expressions.namespaces'
+    
+    - name: summarizeByNamespace
+      message: "Create resource summary per namespace"
+      dependsOn:
+        - getResources
+      expressions:
+        - name: namespaceSummary
+          expression: >-
+            variables.namespaces.filter(ns, ns.metadata.name != "kube-system" && ns.metadata.name != "kube-public" && ns.metadata.name != "kube-node-lease").map(ns, {
+              "namespace": dyn(ns.metadata.name),
+              "pods": dyn({
+                "total": size(variables.pods.filter(p, p.metadata.namespace == ns.metadata.name)),
+                "running": size(variables.pods.filter(p, p.metadata.namespace == ns.metadata.name && p.status.phase == "Running")),
+                "pending": size(variables.pods.filter(p, p.metadata.namespace == ns.metadata.name && p.status.phase == "Pending")),
+                "failed": size(variables.pods.filter(p, p.metadata.namespace == ns.metadata.name && p.status.phase == "Failed"))
+              }),
+              "deployments": dyn(size(variables.deployments.filter(d, d.metadata.namespace == ns.metadata.name))),
+              "services": dyn(size(variables.services.filter(s, s.metadata.namespace == ns.metadata.name)))
+            })
+      outputs:
+        - name: report
+          value:
+            generatedAt: string(time.now())
+            namespaces: expressions.namespaceSummary
+            totals:
+              namespaces: size(expressions.namespaceSummary)
+              pods: size(variables.pods)
+              deployments: size(variables.deployments)
+              services: size(variables.services)
+  
+  outputs:
+    - name: report
+      expression: 'variables.report'

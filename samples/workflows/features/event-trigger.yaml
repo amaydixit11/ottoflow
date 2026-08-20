@@ -1,0 +1,33 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-creation-monitor
+  namespace: ottoflow
+spec:
+  steps:
+    - name: logPodCreation
+      message: "Log when a pod is created"
+      expressions:
+        - name: timestamp
+          expression: 'time.now()'
+        - name: event-time
+          expression: 'string(expressions["timestamp"])'
+      outputs:
+        - name: event-time
+          expression: 'expressions["event-time"]'
+        - name: message
+          expression: '"Pod creation event detected at " + expressions["event-time"]'
+  outputs:
+    - name: event-summary
+      expression: 'variables.message'
+  triggers:
+    - event:
+        resources:
+          - apiVersion: v1
+            kind: Pod
+            namespace: ottoflow
+        operations:
+          - CREATE
+        labelSelector:
+          matchLabels:
+            app: monitored

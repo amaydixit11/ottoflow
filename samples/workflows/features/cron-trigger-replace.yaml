@@ -1,0 +1,36 @@
+# Cron trigger with Replace concurrency policy: if a previous run is still
+# active when the next schedule fires, the active run is cancelled and a
+# fresh run is started. Useful for periodic scans where only the latest
+# result matters.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: stale-pod-scan
+  namespace: ottoflow
+spec:
+  steps:
+    - name: scan
+      expressions:
+        - name: pods
+          expression: 'resource.List("v1", "Pod", "", {}).items'
+        - name: stale
+          expression: >-
+            expressions.pods.filter(p,
+              has(p.status.startTime) &&
+              time.now() - timestamp(p.status.startTime) > duration("24h"))
+        - name: staleCount
+          expression: 'size(expressions.stale)'
+      outputs:
+        - name: count
+          expression: 'expressions.staleCount'
+        - name: summary
+          expression: >-
+            format("Found %d pods running longer than 24h",
+              expressions.staleCount)
+  outputs:
+    - name: report
+      expression: 'variables.summary'
+  triggers:
+    - cron:
+        schedule: "0 */6 * * *"           # every 6 hours
+        concurrencyPolicy: "Replace"

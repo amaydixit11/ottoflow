@@ -1,0 +1,37 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: resource-list
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to list pods from"
+      default: "default"
+  
+  steps:
+    - name: listPods
+      message: "List all pods in namespace"
+      expressions:
+        - name: podList
+          expression: 'resource.List("v1", "Pod", inputs.namespace, {}).items'
+        - name: podCount
+          expression: 'size(expressions.podList)'
+        - name: podNames
+          expression: 'expressions.podList.map(p, p.metadata.name)'
+      outputs:
+        - name: count
+          expression: 'expressions.podCount'
+        - name: names
+          expression: 'expressions.podNames'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-list-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-list
+  inputValues:
+    namespace: "ottoflow"

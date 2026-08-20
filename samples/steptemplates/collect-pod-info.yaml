@@ -1,0 +1,27 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: collect-pod-info
+  namespace: ottoflow
+spec:
+  description: "Collects pod information including phase, restart count, and container images"
+  parameters:
+    - name: namespace
+      description: "Pod namespace"
+      required: true
+    - name: podName
+      description: "Pod name"
+      required: true
+  step:
+    message: "Collect information for pod {{.podName}} in namespace {{.namespace}}"
+    resourceQuery:
+      apiVersion: v1
+      resource: Pod
+      namespace: '"{{.namespace}}"'
+      name: '"{{.podName}}"'
+      outputs:
+        phase: object.status.phase
+        restartCount: object.status.containerStatuses.map(c, int(c.restartCount)).sum()
+        images: object.spec.containers.map(c, c.image)
+        containerNames: object.spec.containers.map(c, c.name)
+        ready: object.status.conditions.filter(c, c.type == "Ready")[0].status == "True"

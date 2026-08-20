@@ -1,0 +1,46 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: retry-with-conditions
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: error-type
+      description: "Type of error to simulate"
+      default: "TransientError"
+  steps:
+    - name: stepWithRetryCondition
+      message: "Step that only retries on specific error types"
+      retry:
+        attempts: 3
+        backoff:
+          strategy: exponential
+          initialInterval: "1s"
+        retryOn:
+          - errorType: "TransientError"
+          - errorMessage: ".*temporary.*"
+      expressions:
+        - name: error-sim
+          # This would normally come from an external call. For testing, fetching a
+          # resource that does not exist makes the step fail so the retryOn conditions
+          # above are exercised. Both ternary branches must share a type, and
+          # resource.Get yields a map, so the else branch is an empty map rather than null.
+          expression: 'inputs["error-type"] == "TransientError" ? resource.Get("v1", "configmaps", "default", "non-existent-resource") : {}'
+      outputs:
+        - name: result
+          expression: '"Completed successfully"'
+  outputs:
+    - name: final-result
+      expression: 'variables.result'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: retry-with-conditions-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: retry-with-conditions
+    namespace: ottoflow
+  inputValues:
+    error-type: "TransientError"

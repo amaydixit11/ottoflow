@@ -1,0 +1,20 @@
+{{- if .Values.networkPolicy.create }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-controller
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ottoflow.selectorLabels.n6" . }}
+  policyTypes:
+  - Egress
+  egress:
+    {{- range .Values.networkPolicy.egress }}
+    - {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

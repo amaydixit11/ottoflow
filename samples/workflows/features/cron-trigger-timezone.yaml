@@ -1,0 +1,33 @@
+# Cron trigger with timezone: runs daily at 9 AM Eastern time.
+# The schedule uses IANA timezone support (CRON_TZ) provided by
+# the in-process scheduler.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: daily-cluster-summary
+  namespace: ottoflow
+spec:
+  steps:
+    - name: gatherMetrics
+      expressions:
+        - name: nodeCount
+          expression: 'size(resource.List("v1", "Node", "", {}).items)'
+        - name: nsCount
+          expression: 'size(resource.List("v1", "Namespace", "", {}).items)'
+      outputs:
+        - name: nodes
+          expression: 'expressions.nodeCount'
+        - name: namespaces
+          expression: 'expressions.nsCount'
+        - name: summary
+          expression: >-
+            format("Daily summary: %d nodes, %d namespaces",
+              expressions.nodeCount, expressions.nsCount)
+  outputs:
+    - name: report
+      expression: 'variables.summary'
+  triggers:
+    - cron:
+        schedule: "0 9 * * *"             # 9:00 AM
+        timezone: "America/New_York"      # Eastern time
+        concurrencyPolicy: "Forbid"

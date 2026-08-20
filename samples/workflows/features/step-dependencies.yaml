@@ -1,0 +1,58 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: step-dependencies
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: appName
+      description: "Application name"
+      required: true
+    - name: version
+      description: "Application version"
+      default: "1.0.0"
+  steps:
+    - name: stepA
+      message: "First step"
+      outputs:
+        - name: value
+          expression: inputs.appName + "-" + inputs.version
+        - name: count
+          expression: "42"
+    
+    - name: stepB
+      message: "Second step that depends on step-a"
+      dependsOn:
+        - stepA
+      outputs:
+        - name: processed
+          expression: variables.value + "-world"
+    
+    - name: stepC
+      message: "Third step that depends on step-a"
+      dependsOn:
+        - stepA
+      outputs:
+        - name: result
+          expression: variables.count
+    
+    - name: stepD
+      message: "Final step that depends on step-b and step-c"
+      dependsOn:
+        - stepB
+        - stepC
+      outputs:
+        - name: finalResult
+          expression: variables.processed + "-" + string(variables.result)
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: step-dependencies-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: step-dependencies
+  inputValues:
+    appName: "my-app"
+    version: "2.0.0"

@@ -1,0 +1,73 @@
+# Agent step using the Azure OpenAI provider (gollm provider id: azopenai).
+#
+# Credential mechanism (verified against source, not assumed):
+#   - gollm's azopenai provider reads its API key from the
+#     AZURE_OPENAI_API_KEY process environment variable INSIDE the
+#     agent-executor pod, via os.Getenv.
+#   - AZURE_OPENAI_API_KEY is NOT part of ottoflow's LLMEnvAllowlist
+#     (internal/workflow/executor/exec_client.go), so unlike the other
+#     providers it can never be forwarded through a WorkflowRun at all.
+#   - Set AZURE_OPENAI_API_KEY on the agent-executor pod via the Helm
+#     chart's `agentExecutor.env`
+#     (charts/ottoflow/templates/agent-executor-deployment.yaml), which
+#     supports secretKeyRef. See README.md, "LLM providers and credentials".
+#
+# One-time setup:
+#   kubectl create secret generic llm-credentials \
+#     --namespace ottoflow \
+#     --from-literal=azure-openai-api-key='...'
+#
+#   helm upgrade --install ottoflow charts/ottoflow \
+#     --namespace ottoflow \
+#     --set-json 'agentExecutor.env=[{"name":"AZURE_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"llm-credentials","key":"azure-openai-api-key"}}}]'
+#
+# You will also need AZURE_OPENAI_ENDPOINT set (or override it per-Agent via
+# `spec.config.endpoint` — see agent-custom-endpoint.yaml for that pattern
+# and its caveats, e.g. the scheme being forced to https).
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-azure-openai-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (Azure OpenAI provider)"
+      agentRef:
+        name: azure-openai-agent
+        additionalPrompts:
+          - 'format("Question: %s", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Step outputs land in the shared `variables` map, hence variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-azure-openai-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-azure-openai-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: azure-openai-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: azure-openai
+  modelName: gpt-4o
+  outputExtraction:
+    type: text

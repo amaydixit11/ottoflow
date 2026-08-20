@@ -1,0 +1,164 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: pod-diagnostics-agent
+  namespace: ottoflow
+spec:
+  prompt: |
+    You are a Kubernetes diagnostics expert. Analyze the provided pod information
+    and provide a comprehensive diagnostic report.
+    
+    Your analysis should include:
+    1. Health assessment (healthy, degraded, unhealthy)
+    2. Resource utilization analysis
+    3. Common issues identification (if any)
+    4. Recommendations for improvement
+    5. Potential security concerns
+    
+    Format your response as JSON with the following structure:
+    {
+      "health": "healthy|degraded|unhealthy",
+      "issues": ["issue1", "issue2"],
+      "recommendations": ["rec1", "rec2"],
+      "resourceAnalysis": {
+        "cpu": "adequate|high|low",
+        "memory": "adequate|high|low"
+      },
+      "securityConcerns": ["concern1", "concern2"]
+    }
+  modelProvider: local
+  # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio) so
+  # this sample runs without a cloud API key. The server address comes from the
+  # LLAMACPP_HOST environment variable, NOT from spec.config -- the underlying client does
+  # not read spec.config.endpoint. For ollama:
+  #   LLAMACPP_HOST=http://127.0.0.1:11434/ ottoflow run <workflow> --model <your-model>
+  # Or switch modelProvider to openai / anthropic / azure-openai / google with credentials.
+  outputExtraction:
+    type: json
+    pattern: "$"
+  # Optional: configure MCP tools for deeper analysis
+  # mcpTools:
+  #   - "kubernetes-mcp:get-logs"
+  #   - "kubernetes-mcp:describe-resource"
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-diagnostics-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to diagnose"
+      required: true
+    - name: namespace
+      description: "Namespace of the pod"
+      default: "default"
+  
+  steps:
+    - name: getPodInfo
+      message: "Collect pod information"
+      expressions:
+        - name: pod
+          expression: 'resource.Get("v1", "Pod", inputs.namespace, inputs.podName)'
+        - name: podExists
+          expression: 'expressions.pod != null'
+        - name: podPhase
+          expression: 'expressions.pod.status.phase'
+        - name: podReady
+          expression: 'has(expressions.pod.status.conditions) && expressions.pod.status.conditions.exists(c, c.type == "Ready" && c.status == "True")'
+        - name: containerCount
+          expression: 'size(expressions.pod.spec.containers)'
+        - name: restartCount
+          expression: 'has(expressions.pod.status.containerStatuses) ? expressions.pod.status.containerStatuses.map(c, int(c.restartCount)).sum() : int(0)'
+        - name: imageList
+          expression: 'expressions.pod.spec.containers.map(c, c.image)'
+        - name: nodeName
+          expression: 'expressions.pod.spec.nodeName'
+        - name: podIP
+          expression: 'expressions.pod.status.podIP'
+      outputs:
+        - name: podInfo
+          value:
+            exists: expressions.podExists
+            phase: expressions.podPhase
+            ready: expressions.podReady
+            restartCount: expressions.restartCount
+            containerCount: expressions.containerCount
+            images: expressions.imageList
+            node: expressions.nodeName
+            podIP: expressions.podIP
+            summary: >-
+              format("Pod: %s | Phase: %v | Ready: %v | Restarts: %d",
+                inputs.podName,
+                expressions.podPhase,
+                expressions.podReady,
+                expressions.restartCount)
+    
+    - name: getPodEvents
+      message: "Collect pod events for context"
+      expressions:
+        - name: events
+          expression: 'resourceEvents("v1", "Pod", inputs.namespace, inputs.podName)'
+        - name: errorEvents
+          expression: 'expressions.events.filter(e, e.type == "Warning" || e.reason.contains("Error") || e.reason.contains("Failed"))'
+        - name: eventSummary
+          expression: 'size(expressions.errorEvents) > 0 ? format("Found %d error/warning events", size(expressions.errorEvents)) : "No recent errors"'
+      outputs:
+        - name: eventInfo
+          value:
+            eventCount: size(expressions.events)
+            errorCount: size(expressions.errorEvents)
+            eventSummary: expressions.eventSummary
+    
+    - name: analyzeWithAgent
+      message: "Use AI agent to analyze pod diagnostics"
+      dependsOn:
+        - getPodInfo
+        - getPodEvents
+      agentRef:
+        name: pod-diagnostics-agent
+        additionalPrompts:
+          # Using format() function for cleaner string formatting
+          - >-
+            format("=== POD INFORMATION ===\nName: %s\nNamespace: %s\nPhase: %v\nReady: %v\nRestart Count: %d\nNode: %v\nPod IP: %v\nContainer Images: %v\n\n=== EVENTS ===\n%s\nError Events: %v\n\nProvide a comprehensive diagnostic analysis with health assessment, issues identification, recommendations, and security concerns. Format as JSON.",
+              inputs.podName,
+              inputs.namespace,
+              variables.podInfo.phase,
+              variables.podInfo.ready,
+              variables.podInfo.restartCount,
+              variables.podInfo.node,
+              variables.podInfo.podIP,
+              variables.podInfo.images,
+              variables.eventInfo.eventSummary,
+              variables.eventInfo.errorCount)
+      outputs:
+        - name: diagnosticAnalysis
+          value:
+            healthStatus: agentOutputs.health
+            issues: agentOutputs.issues
+            recommendations: agentOutputs.recommendations
+            resourceAnalysis: agentOutputs.resourceAnalysis
+            securityConcerns: agentOutputs.securityConcerns
+            fullReport: string(agentResponse)
+  
+  outputs:
+    - name: podHealth
+      expression: 'variables.diagnosticAnalysis.healthStatus'
+    - name: diagnosticReport
+      expression: 'variables.diagnosticAnalysis.fullReport'
+    - name: recommendations
+      expression: 'variables.diagnosticAnalysis.recommendations'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: pod-diagnostics-workflow-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: pod-diagnostics-workflow
+  inputValues:
+    podName: "nginx"
+    namespace: "ottoflow"

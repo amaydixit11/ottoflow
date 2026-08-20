@@ -1,0 +1,39 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: kubernetes-mcp
+  namespace: ottoflow
+spec:
+  transport:
+    type: stdio
+    command:
+      - "npx"
+      - "-y"
+      - "@modelcontextprotocol/server-kubernetes"
+  timeout: "30s"
+  auth:
+    type: none
+  env: []
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: http-mcp-server
+  namespace: ottoflow
+spec:
+  transport:
+    type: http
+    address: "https://api.example.com/mcp"
+    headers:
+      Content-Type: "application/json"
+  timeout: "60s"
+  auth:
+    type: bearer
+    secretRef:
+      name: mcp-auth-secret
+      namespace: ottoflow
+      key: token
+  env:
+    - name: API_ENV
+      value: "production"

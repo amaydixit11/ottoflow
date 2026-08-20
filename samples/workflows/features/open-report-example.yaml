@@ -1,0 +1,113 @@
+# open-report-example.yaml
+#
+# Demonstrates the openReport step type.
+#
+# This workflow queries Kyverno PolicyReports in a namespace, builds a list of
+# policy check results in OpenReports format, and emits them as an
+# openreports.io/v1alpha1 Report CRD.
+#
+# If the OpenReports CRD is not installed, the step succeeds with mode="data"
+# and emits a Warning event on the WorkflowRun — no manual configuration needed.
+#
+# Prerequisites (for CRD mode):
+#   helm repo add openreports https://openreports.io/charts
+#   helm install openreports openreports/openreports -n openreports --create-namespace
+#
+# Run locally (data mode, no cluster needed):
+#   ottoflow run -f open-report-example.yaml --local \
+#     --input namespace=default
+#
+# Run in-cluster (CRD mode when OpenReports installed):
+#   kubectl apply -f open-report-example.yaml
+#   kubectl apply -f - <<EOF
+#   apiVersion: ottoflow.nirmata.io/v1alpha1
+#   kind: WorkflowRun
+#   metadata:
+#     name: compliance-report-run
+#     namespace: default
+#   spec:
+#     workflowRef:
+#       name: compliance-report-example
+#     inputs:
+#       namespace: default
+#   EOF
+#
+# After a successful run (CRD mode):
+#   kubectl get reports -n default
+#   kubectl describe workflowrun compliance-report-run -n default
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: compliance-report-example
+  namespace: default
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to collect PolicyReports from"
+      default: "default"
+
+  steps:
+    # Step 1: List all PolicyReports in the target namespace.
+    # PolicyReports are created by Kyverno after policy evaluation.
+    - name: collectPolicyReports
+      resourceQuery:
+        apiVersion: wgpolicyk8s.io/v1alpha2
+        resource: PolicyReport
+        namespace: "inputs.namespace"
+        outputs:
+          reports: 'items'
+
+    # Step 2: Build a flat list of ReportResult entries from all PolicyReports,
+    # mapping wgpolicyk8s.io fields to the openreports.io ReportResult schema.
+    - name: buildResults
+      dependsOn: [collectPolicyReports]
+      expressions:
+        - name: results
+          # Heterogeneous CEL map literals need dyn() on EVERY value, or the
+          # type-checker rejects the literal (dyn vs string mismatch).
+          expression: |
+            variables.reports.map(report,
+              report.results.map(r, {
+                "policy":   dyn(r.policy),
+                "rule":     dyn(r.?rule.orValue("")),
+                "result":   dyn(r.result),
+                "scored":   dyn(r.?scored.orValue(true)),
+                "severity": dyn(r.?severity.orValue("")),
+                "message":  dyn(r.?message.orValue("")),
+                "source":   dyn("kyverno")
+              })
+            ).flatten()
+
+    # Step 3: Emit the results as an OpenReports.io Report CRD.
+    # - When OpenReports is installed: creates a Report CRD in the target namespace.
+    # - When OpenReports is absent: stores data in reportResult.data with a Warning event.
+    - name: emitReport
+      dependsOn: [buildResults]
+      openReport:
+        reportName: "compliance-report"
+        source: "ottoflow"
+        resultsExpression: "expressions.results"
+        # summaryExpression omitted — executor auto-computes pass/fail/warn/error/skip counts
+      outputs:
+        - name: reportMode
+          expression: "reportResult.mode"
+        - name: reportName
+          expression: "reportResult.name"
+        - name: failCount
+          expression: "reportResult.summary.fail"
+        - name: passCount
+          expression: "reportResult.summary.pass"
+
+  outputs:
+    - name: reportMode
+      expression: "variables.reportMode"
+    - name: reportName
+      expression: "variables.reportName"
+    - name: failCount
+      expression: "variables.failCount"
+    - name: passCount
+      expression: "variables.passCount"
+    # Capture full report data for inspection (useful when mode="data")
+    - name: reportData
+      expression: "variables.reportResult.data"

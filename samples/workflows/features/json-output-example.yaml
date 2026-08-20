@@ -1,0 +1,82 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: json-output-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: podName
+      description: "Name of the pod to analyze"
+    - name: namespace
+      description: "Namespace of the pod"
+      default: "default"
+  
+  steps:
+    - name: generateDiagnosticReport
+      message: "Generate comprehensive diagnostic report as JSON"
+      expressions:
+        - name: pod
+          expression: 'resource.Get("v1", "Pod", inputs.namespace, inputs.podName)'
+        - name: events
+          expression: 'resourceEvents("v1", "Pod", inputs.namespace, inputs.podName)'
+        - name: errorEvents
+          expression: 'expressions.events.filter(e, e.type == "Warning" || e.reason.contains("Error"))'
+      outputs:
+        # Output can be a complex JSON structure using YAML value style
+        - name: diagnosticReport
+          value:
+            pod:
+              name: inputs.podName
+              namespace: inputs.namespace
+              phase: expressions.pod.status.phase
+              node: expressions.pod.spec.nodeName
+              ip: expressions.pod.status.podIP
+              restartCount: "has(expressions.pod.status.containerStatuses) ? expressions.pod.status.containerStatuses.map(c, int(c.restartCount)).sum() : int(0)"
+            events:
+              total: size(expressions.events)
+              errors: size(expressions.errorEvents)
+              recentErrors: >-
+                expressions.errorEvents.map(e, {
+                  "type": dyn(e.type),
+                  "reason": dyn(e.reason),
+                  "message": dyn(e.message),
+                  "count": dyn(e.count)
+                })
+            summary:
+              healthy: >-
+                expressions.pod.status.phase == "Running" && 
+                size(expressions.errorEvents) == int(0)
+              issues: >-
+                size(expressions.errorEvents) > int(0) ? ["Pod has error events"] : []
+              recommendations: >-
+                expressions.pod.status.phase != "Running" ? [format("Investigate pod phase: %v", expressions.pod.status.phase)] : []
+            timestamp: string(time.now())
+        # Another output with a list of resources
+        - name: resourceList
+          value:
+            - kind: Pod
+              name: inputs.podName
+              namespace: inputs.namespace
+              status: expressions.pod.status.phase
+            - kind: Event
+              count: size(expressions.events)
+              errors: size(expressions.errorEvents)
+    
+    - name: formatReport
+      message: "Format the diagnostic report"
+      dependsOn:
+        - generateDiagnosticReport
+      outputs:
+        - name: formattedReport
+          value: >-
+            format("=== DIAGNOSTIC REPORT ===\nPod: %s\nPhase: %v\nHealthy: %v\nErrors: %d",
+              variables.diagnosticReport.pod.name,
+              variables.diagnosticReport.pod.phase,
+              variables.diagnosticReport.summary.healthy,
+              variables.diagnosticReport.events.errors)
+  
+  outputs:
+    - name: finalReport
+      expression: 'variables.diagnosticReport'
+    - name: resourceSummary
+      expression: 'variables.resourceList'

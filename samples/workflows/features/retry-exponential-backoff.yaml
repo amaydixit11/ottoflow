@@ -1,0 +1,47 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: retry-exponential-backoff
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: resource-name
+      description: "Name of the resource to check"
+      default: "test-configmap"
+  steps:
+    - name: checkResourceExists
+      message: "Check if resource exists (will fail initially, succeed on retry)"
+      retry:
+        attempts: 3
+        backoff:
+          strategy: exponential
+          initialInterval: "2s"
+          maxInterval: "10s"
+          multiplier: 2.0
+      expressions:
+        - name: resource-check
+          # resource.Get returns a map, which CEL cannot compare against null. It also
+          # errors outright when the resource is absent rather than returning something
+          # empty -- which is what makes this sample work: the step fails, the retry
+          # backoff kicks in, and it succeeds once the ConfigMap exists.
+          expression: 'has(resource.Get("v1", "configmaps", "default", inputs["resource-name"]).metadata.name)'
+      outputs:
+        - name: exists
+          expression: 'expressions["resource-check"]'
+        - name: attempt-info
+          expression: '"Resource check completed"'
+  outputs:
+    - name: final-status
+      expression: '"Resource exists: " + string(variables.exists)'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: retry-exponential-backoff-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: retry-exponential-backoff
+    namespace: ottoflow
+  inputValues:
+    resource-name: "test-configmap"

@@ -1,0 +1,30 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: get-pod-metrics
+  namespace: ottoflow
+spec:
+  description: "Gets CPU and memory metrics for a pod"
+  parameters:
+    - name: namespace
+      description: "Pod namespace"
+      required: true
+    - name: podName
+      description: "Pod name"
+      required: true
+  step:
+    message: "Get metrics for pod {{.podName}}"
+    expressions:
+      - name: metrics
+        expression: 'resourceMetrics("v1", "Pod", "{{.namespace}}", "{{.podName}}", "")'
+      - name: totalCPU
+        expression: 'expressions.metrics.totalCPU'
+      - name: totalMemory
+        expression: 'expressions.metrics.totalMemory'
+    outputs:
+      - name: metrics
+        expression: 'expressions.metrics'
+      - name: totalCPU
+        expression: 'expressions.totalCPU'
+      - name: totalMemory
+        expression: 'expressions.totalMemory'

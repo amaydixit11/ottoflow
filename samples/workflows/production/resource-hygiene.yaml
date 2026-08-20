@@ -1,0 +1,1026 @@
+# Resource Hygiene — Kubernetes unused resource detection and cleanup report
+#
+# Scans the cluster for unused and stale resources using Kyverno-style cleanup criteria.
+#
+# Detects 14 categories of unused/stale resources:
+#   - Unused Services (no matching pods)
+#   - Unused ConfigMaps (not referenced by pods)
+#   - Unused PVCs (bound but not mounted)
+#   - Unused PVs (available/released/failed)
+#   - Unused Ingresses (referencing non-existent backend services)
+#   - Unused NetworkPolicies (no matching pods)
+#   - Unused PodDisruptionBudgets (no matching pods)
+#   - Orphan Pods (no owner references)
+#   - Idle Deployments (scaled to 0 replicas)
+#   - Idle StatefulSets (scaled to 0 replicas)
+#   - Stale ReplicaSets (0 replicas, no active pods)
+#   - CrashLoopBackOff Pods
+#   - Empty Namespaces (no workloads)
+#   - Resources in the default namespace
+#
+# Inputs:
+#   runId        — optional external run correlation ID
+#   namespace    — limit scan to one namespace (optional; scans all if blank)
+#   clusterName  — display label for the report; defaults to "cluster"
+#
+# The workflow publishes markdownReport + assessmentSummary in status.outputs.
+#
+# Test locally: ottoflow run samples/workflows/production/resource-hygiene.yaml \
+#                 --input clusterName=my-cluster
+#
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: resource-hygiene
+  namespace: ottoflow
+  labels:
+    app: resource-hygiene
+  annotations:
+    description: >-
+      Scans Kubernetes clusters for unused and stale resources. Detects unused
+      services, configmaps, PVCs, PVs, ingress, network policies, PDBs, orphan
+      pods, idle deployments/statefulsets, stale replicasets, CrashLoopBackOff
+      pods, empty namespaces, and resources in the default namespace.
+      Generates a comprehensive cleanup report with prioritized recommendations.
+spec:
+  inputs:
+    - name: runId
+      description: "Optional external run correlation ID."
+      default: "local"
+      required: false
+    - name: clusterName
+      description: "Display label for the report. Defaults to \"cluster\"."
+      default: "cluster"
+      required: false
+    - name: namespace
+      description: "Target namespace to scan. Leave empty to scan all namespaces."
+      default: ""
+      required: false
+    - name: maxCategorySize
+      description: >-
+        Safety cap: skip the nested unused-resource comparison for a category
+        (services, configmaps, PVCs, ingresses, network policies, PDBs) when its
+        raw collected count exceeds this. Prevents O(count×pods) CEL evaluation
+        from running for hours on a cluster with a pathological resource count.
+      default: "5000"
+      required: false
+    - name: maxComparisonCost
+      description: >-
+        Safety cap: skip the nested comparison for a category when
+        (category count × pod count) exceeds this, even if the category count
+        alone is under maxCategorySize (catches moderate-count-vs-huge-pod-count
+        clusters too).
+      default: "10000000"
+      required: false
+    - name: maxPromptItemsPerCategory
+      description: >-
+        Max resource names embedded per category in the LLM report prompt;
+        anything beyond this is summarized as a count instead of listed, so a
+        pathological category can never blow the model's context window.
+      default: "25"
+      required: false
+
+  celCostLimit: 500000000
+
+  events:
+    enabled: true
+    level: WorkflowAndSteps
+
+  outputs:
+    - name: markdownReport
+      expression: 'variables.?markdownReport.orValue("Report generation skipped — set NIRMATA_LLM_APIKEY to enable LLM-powered report.")'
+    - name: assessmentSummary
+      expression: 'variables.assessmentSummary'
+    - name: runId
+      expression: 'inputs.runId'
+    - name: totalUnusedResources
+      expression: 'variables.totalUnusedResources'
+      metric:
+        name: resource_cleanup_unused_total
+        type: gauge
+        help: "Total number of unused resources detected across the cluster"
+        labels:
+          - name: cluster
+            value: 'inputs.clusterName'
+    - name: crashLoopPodCount
+      expression: 'size(variables.crashLoopPods)'
+      metric:
+        name: resource_cleanup_crashloop_pods
+        type: gauge
+        help: "Number of pods in CrashLoopBackOff state"
+        labels:
+          - name: cluster
+            value: 'inputs.clusterName'
+    - name: requiresInvestigation
+      expression: 'variables.requiresInvestigation'
+      metric:
+        name: resource_cleanup_requires_investigation
+        type: gauge
+        help: "1 when one or more categories exceeded the safe-analysis threshold and were skipped"
+        labels:
+          - name: cluster
+            value: 'inputs.clusterName'
+
+  steps:
+    # ── Step 1: Collect cluster-scoped data (namespace list) ────────
+    - name: collectClusterData
+      message: "Collect namespace list"
+      expressions:
+        - name: namespaces
+          expression: 'dyn(resource.List("v1", "Namespace", "", {})).items'
+        - name: namespaceNames
+          expression: |-
+            inputs.?namespace.orValue("") != ""
+              ? [inputs.?namespace.orValue("")]
+              : expressions.namespaces.map(ns, ns.metadata.name)
+                .filter(ns, ns != "kube-system" && ns != "kube-public" && ns != "kube-node-lease")
+      outputs:
+        - name: namespaceNames
+          expression: 'expressions.namespaceNames'
+        - name: namespaces
+          expression: 'expressions.namespaces'
+
+    # ── Step 2: Collect per-namespace resources (concurrent, fault-tolerant) ─
+    # forEach runs one child-step per namespace instead of a single CEL `.map()`
+    # over all namespaces. This matters because CEL has no failure isolation
+    # between map iterations — one namespace with a stalled/hung tunnel
+    # connection would previously block (or abort) collection for every other
+    # namespace too. With itemFailurePolicy: Continue, a namespace that fails
+    # (even after retrying) is recorded in `.failed` and skipped; the rest of
+    # the run proceeds and the failure is surfaced in the report rather than
+    # silently dropped or left to hang for the full agent timeout.
+    # maxConcurrency parallelizes what was previously a strictly sequential
+    # per-namespace fan-out — same pattern already proven in cost-analyzer's
+    # collectNamespaceResources step.
+    - name: collectPerNamespaceResources
+      message: "Collect pods, deployments, statefulsets, services, configmaps, PVCs, ingresses, network policies, PDBs, and replicasets per namespace"
+      dependsOn:
+        - collectClusterData
+      forEach:
+        items: 'variables.namespaceNames'
+        maxConcurrency: 10
+        itemFailurePolicy: Continue
+        step:
+          # Hard per-attempt ceiling, independent of the per-page 45s HTTP context
+          # deadline already enforced in resource_context.go. Belt-and-suspenders:
+          # if a transport-level hang ever fails to honor that context deadline
+          # (e.g. a stalled tunnel connection stuck below the HTTP layer), the
+          # workflow engine still kills the attempt itself rather than letting one
+          # namespace block the run for the full 30-minute agent timeout.
+          timeout: "90s"
+          # Retries transient network failures (tunnel hiccups, TLS handshake
+          # timeouts, connection resets) a few times with backoff before this
+          # namespace is recorded as failed. Non-transient errors (e.g. RBAC
+          # denial) exhaust their retries quickly since each attempt fails the
+          # same way, so this doesn't meaningfully slow down a real permission
+          # problem — it's sized for the transient case.
+          retry:
+            attempts: 3
+            backoff:
+              strategy: exponential
+              initialInterval: "2s"
+              maxInterval: "30s"
+            retryOn:
+              - errorMessage: '(?i)(timeout|timed out|tls handshake|connection reset|connection refused|i/o timeout|EOF|broken pipe)'
+          expressions:
+            - name: pods
+              expression: 'dyn(resource.List("v1", "Pod", variables.item, {})).items'
+            - name: deployments
+              expression: 'dyn(resource.List("apps/v1", "Deployment", variables.item, {})).items'
+            - name: statefulsets
+              expression: 'dyn(resource.List("apps/v1", "StatefulSet", variables.item, {})).items'
+            - name: services
+              expression: 'dyn(resource.List("v1", "Service", variables.item, {})).items'
+            - name: configmaps
+              expression: 'dyn(resource.List("v1", "ConfigMap", variables.item, {})).items'
+            - name: pvcs
+              expression: 'dyn(resource.List("v1", "PersistentVolumeClaim", variables.item, {})).items'
+            - name: ingresses
+              expression: 'dyn(resource.List("networking.k8s.io/v1", "Ingress", variables.item, {})).items'
+            - name: networkPolicies
+              expression: 'dyn(resource.List("networking.k8s.io/v1", "NetworkPolicy", variables.item, {})).items'
+            - name: pdbs
+              expression: 'dyn(resource.List("policy/v1", "PodDisruptionBudget", variables.item, {})).items'
+            - name: replicasets
+              expression: 'dyn(resource.List("apps/v1", "ReplicaSet", variables.item, {})).items'
+          outputs:
+            - name: pods
+              expression: 'expressions.pods'
+            - name: deployments
+              expression: 'expressions.deployments'
+            - name: statefulsets
+              expression: 'expressions.statefulsets'
+            - name: services
+              expression: 'expressions.services'
+            - name: configmaps
+              expression: 'expressions.configmaps'
+            - name: pvcs
+              expression: 'expressions.pvcs'
+            - name: ingresses
+              expression: 'expressions.ingresses'
+            - name: networkPolicies
+              expression: 'expressions.networkPolicies'
+            - name: pdbs
+              expression: 'expressions.pdbs'
+            - name: replicasets
+              expression: 'expressions.replicasets'
+      outputs:
+        - name: pods
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.pods).flatten()'
+        - name: deployments
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.deployments).flatten()'
+        - name: statefulsets
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.statefulsets).flatten()'
+        - name: services
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.services).flatten()'
+        - name: configmaps
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.configmaps).flatten()'
+        - name: pvcs
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.pvcs).flatten()'
+        - name: ingresses
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.ingresses).flatten()'
+        - name: networkPolicies
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.networkPolicies).flatten()'
+        - name: pdbs
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.pdbs).flatten()'
+        - name: replicasets
+          expression: 'steps.collectPerNamespaceResources.succeeded.map(r, r.outputs.replicasets).flatten()'
+        - name: collectionFailedNamespaces
+          expression: 'steps.collectPerNamespaceResources.failed.map(f, f.item)'
+        - name: collectionFailedCount
+          expression: 'size(steps.collectPerNamespaceResources.failed)'
+
+    # ── Step 2a: Guard against pathological resource counts ─────────
+    # Detection steps below do O(count×pods)-ish nested CEL `.filter().exists()`
+    # comparisons. On a healthy cluster these run in milliseconds; on a cluster
+    # with a runaway resource count (e.g. a CI pipeline leaking one
+    # PodDisruptionBudget per build, never cleaned up) the same comparison can
+    # take hours and blow past the agent's execution timeout. Compute cheap
+    # (O(n)) counts up front and skip the expensive comparison for any category
+    # that crosses either safety threshold — the raw count is still reported,
+    # just not cross-referenced against pods.
+    - name: computeAnalysisFeasibility
+      message: "Check resource counts against safety thresholds before running nested comparisons"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+      expressions:
+        # variables.pods only includes namespaces that collected successfully
+        # (itemFailurePolicy: Continue drops failed ones), so podCount can be an
+        # undercount and the count×podCount feasibility checks below run on a
+        # partial view. Not treated as a hard blocker here because any
+        # collection failure already forces requiresInvestigation=true via the
+        # "Collection" flaggedCategory in buildAssessmentSummary, surfacing the
+        # partial-data caveat to the operator regardless of what feasibility
+        # concluded.
+        - name: podCount
+          expression: 'size(variables.pods)'
+        - name: maxCategorySize
+          expression: 'int(inputs.?maxCategorySize.orValue("5000"))'
+        - name: maxComparisonCost
+          expression: 'int(inputs.?maxComparisonCost.orValue("10000000"))'
+        - name: serviceCount
+          expression: 'size(variables.services)'
+        - name: configMapCount
+          expression: 'size(variables.configmaps)'
+        - name: pvcCount
+          expression: 'size(variables.pvcs)'
+        - name: ingressCount
+          expression: 'size(variables.ingresses)'
+        - name: networkPolicyCount
+          expression: 'size(variables.networkPolicies)'
+        - name: pdbCount
+          expression: 'size(variables.pdbs)'
+        - name: serviceFeasible
+          expression: |-
+            expressions.serviceCount <= expressions.maxCategorySize &&
+            (expressions.serviceCount * expressions.podCount) <= expressions.maxComparisonCost
+        - name: configMapFeasible
+          expression: |-
+            expressions.configMapCount <= expressions.maxCategorySize &&
+            (expressions.configMapCount * expressions.podCount) <= expressions.maxComparisonCost
+        - name: pvcFeasible
+          expression: |-
+            expressions.pvcCount <= expressions.maxCategorySize &&
+            (expressions.pvcCount * expressions.podCount) <= expressions.maxComparisonCost
+        - name: ingressFeasible
+          expression: |-
+            expressions.ingressCount <= expressions.maxCategorySize &&
+            (expressions.ingressCount * expressions.serviceCount) <= expressions.maxComparisonCost
+        - name: networkPolicyFeasible
+          expression: |-
+            expressions.networkPolicyCount <= expressions.maxCategorySize &&
+            (expressions.networkPolicyCount * expressions.podCount) <= expressions.maxComparisonCost
+        - name: pdbFeasible
+          expression: |-
+            expressions.pdbCount <= expressions.maxCategorySize &&
+            (expressions.pdbCount * expressions.podCount) <= expressions.maxComparisonCost
+      outputs:
+        - name: podCount
+          expression: 'expressions.podCount'
+        - name: maxCategorySize
+          expression: 'expressions.maxCategorySize'
+        - name: maxComparisonCost
+          expression: 'expressions.maxComparisonCost'
+        - name: serviceCount
+          expression: 'expressions.serviceCount'
+        - name: configMapCount
+          expression: 'expressions.configMapCount'
+        - name: pvcCount
+          expression: 'expressions.pvcCount'
+        - name: ingressCount
+          expression: 'expressions.ingressCount'
+        - name: networkPolicyCount
+          expression: 'expressions.networkPolicyCount'
+        - name: pdbCount
+          expression: 'expressions.pdbCount'
+        - name: serviceFeasible
+          expression: 'expressions.serviceFeasible'
+        - name: configMapFeasible
+          expression: 'expressions.configMapFeasible'
+        - name: pvcFeasible
+          expression: 'expressions.pvcFeasible'
+        - name: ingressFeasible
+          expression: 'expressions.ingressFeasible'
+        - name: networkPolicyFeasible
+          expression: 'expressions.networkPolicyFeasible'
+        - name: pdbFeasible
+          expression: 'expressions.pdbFeasible'
+
+    # ── Step 2b: Collect PersistentVolumes (cluster-scoped, may lack permission) ─
+    - name: collectPersistentVolumes
+      message: "Collect cluster-scoped PersistentVolumes (skipped if SA lacks list permission)"
+      failurePolicy: Continue
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: pvs
+          expression: 'dyn(resource.List("v1", "PersistentVolume", "", {})).items'
+      outputs:
+        - name: pvs
+          expression: 'expressions.pvs'
+
+    # ── Step 2c: Default PVs to empty list if collectPersistentVolumes was skipped ─
+    - name: ensurePVDefaults
+      message: "Default PVs to empty list when PV collection was skipped due to permissions"
+      dependsOn:
+        - collectPersistentVolumes
+      expressions:
+        - name: pvs
+          expression: 'variables.?pvs.orValue([])'
+      outputs:
+        - name: pvs
+          expression: 'expressions.pvs'
+
+    # ── Step 3: Detect unused services ─────────────────────────────
+    - name: detectUnusedServices
+      message: "Detect services with no matching pods based on label selectors"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - computeAnalysisFeasibility
+      expressions:
+        - name: unusedServices
+          expression: |-
+            !variables.serviceFeasible ? [] :
+            variables.services.filter(svc,
+              svc.metadata.name != "kubernetes" &&
+              has(svc.spec) && has(svc.spec.selector) &&
+              size(svc.spec.selector) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == svc.metadata.namespace &&
+                has(p.metadata.labels) &&
+                svc.spec.selector.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == svc.spec.selector[key]
+                )
+              )
+            ).map(svc, svc.metadata.namespace + "/" + svc.metadata.name)
+        - name: serviceAnalysisSkipped
+          expression: '!variables.serviceFeasible'
+      outputs:
+        - name: unusedServices
+          expression: 'expressions.unusedServices'
+        - name: serviceAnalysisSkipped
+          expression: 'expressions.serviceAnalysisSkipped'
+
+    # ── Step 4: Detect unused configmaps ───────────────────────────
+    - name: detectUnusedConfigMaps
+      message: "Detect configmaps not referenced by any pod via volumes or envFrom"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - computeAnalysisFeasibility
+      expressions:
+        - name: unusedConfigMaps
+          expression: |-
+            !variables.configMapFeasible ? [] :
+            variables.configmaps.filter(cm,
+              cm.metadata.name != "kube-root-ca.crt" &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == cm.metadata.namespace &&
+                has(p.spec) && (
+                  (has(p.spec.volumes) && p.spec.volumes.exists(v,
+                    has(v.configMap) && v.configMap.name == cm.metadata.name)) ||
+                  (has(p.spec.containers) && p.spec.containers.exists(c,
+                    has(c.envFrom) && c.envFrom.exists(e,
+                      has(e.configMapRef) && e.configMapRef.name == cm.metadata.name)))
+                )
+              )
+            ).map(cm, cm.metadata.namespace + "/" + cm.metadata.name)
+        - name: configMapAnalysisSkipped
+          expression: '!variables.configMapFeasible'
+      outputs:
+        - name: unusedConfigMaps
+          expression: 'expressions.unusedConfigMaps'
+        - name: configMapAnalysisSkipped
+          expression: 'expressions.configMapAnalysisSkipped'
+
+    # ── Step 5: Detect unused volumes ──────────────────────────────
+    - name: detectUnusedVolumes
+      message: "Detect unused PVCs (bound but not mounted) and PVs (available/released/failed)"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - ensurePVDefaults
+        - collectPersistentVolumes
+        - computeAnalysisFeasibility
+      expressions:
+        - name: unusedPVCs
+          expression: |-
+            !variables.pvcFeasible ? [] :
+            variables.pvcs.filter(pvc,
+              has(pvc.status) && pvc.status.phase == "Bound" &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == pvc.metadata.namespace &&
+                has(p.spec) && has(p.spec.volumes) &&
+                p.spec.volumes.exists(v,
+                  has(v.persistentVolumeClaim) &&
+                  v.persistentVolumeClaim.claimName == pvc.metadata.name)
+              )
+            ).map(pvc, pvc.metadata.namespace + "/" + pvc.metadata.name)
+        - name: pvcAnalysisSkipped
+          expression: '!variables.pvcFeasible'
+        # unusedPVs is a self-filter over pvs (O(n), not nested against pods) — no guard needed.
+        - name: unusedPVs
+          expression: |-
+            variables.pvs.filter(pv,
+              has(pv.status) &&
+              (pv.status.phase == "Available" || pv.status.phase == "Released" || pv.status.phase == "Failed")
+            ).map(pv, pv.metadata.name)
+      outputs:
+        - name: unusedPVCs
+          expression: 'expressions.unusedPVCs'
+        - name: pvcAnalysisSkipped
+          expression: 'expressions.pvcAnalysisSkipped'
+        - name: unusedPVs
+          expression: 'expressions.unusedPVs'
+
+    # ── Step 6: Detect stale workloads ─────────────────────────────
+    - name: detectStaleWorkloads
+      message: "Detect orphan pods, idle deployments/statefulsets, stale replicasets, and CrashLoopBackOff pods"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - ensurePVDefaults
+      expressions:
+        - name: orphanPods
+          expression: |-
+            variables.pods.filter(p,
+              !has(p.metadata.ownerReferences) ||
+              size(p.metadata.ownerReferences) == 0
+            ).map(p, p.metadata.namespace + "/" + p.metadata.name)
+        - name: idleDeployments
+          expression: |-
+            variables.deployments.filter(d,
+              has(d.spec) && has(d.spec.replicas) && d.spec.replicas == 0
+            ).map(d, d.metadata.namespace + "/" + d.metadata.name)
+        - name: idleStatefulSets
+          expression: |-
+            variables.statefulsets.filter(ss,
+              has(ss.spec) && has(ss.spec.replicas) && ss.spec.replicas == 0
+            ).map(ss, ss.metadata.namespace + "/" + ss.metadata.name)
+        - name: staleReplicaSets
+          expression: |-
+            variables.replicasets.filter(rs,
+              has(rs.spec) && has(rs.spec.replicas) && rs.spec.replicas == 0 &&
+              has(rs.status) && has(rs.status.replicas) && rs.status.replicas == 0
+            ).map(rs, rs.metadata.namespace + "/" + rs.metadata.name)
+        - name: crashLoopPods
+          expression: |-
+            variables.pods.filter(p,
+              has(p.status) && has(p.status.containerStatuses) &&
+              p.status.containerStatuses.exists(cs,
+                has(cs.state) && has(cs.state.waiting) &&
+                has(cs.state.waiting.reason) &&
+                cs.state.waiting.reason == "CrashLoopBackOff"
+              )
+            ).map(p, p.metadata.namespace + "/" + p.metadata.name)
+      outputs:
+        - name: orphanPods
+          expression: 'expressions.orphanPods'
+        - name: idleDeployments
+          expression: 'expressions.idleDeployments'
+        - name: idleStatefulSets
+          expression: 'expressions.idleStatefulSets'
+        - name: staleReplicaSets
+          expression: 'expressions.staleReplicaSets'
+        - name: crashLoopPods
+          expression: 'expressions.crashLoopPods'
+
+    # ── Step 7: Detect unused network resources ────────────────────
+    - name: detectUnusedNetworkResources
+      message: "Detect unused ingresses, network policies, and PDBs"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - ensurePVDefaults
+        - computeAnalysisFeasibility
+      expressions:
+        - name: unusedIngresses
+          expression: |-
+            !variables.ingressFeasible ? [] :
+            variables.ingresses.filter(ing,
+              has(ing.spec) && has(ing.spec.rules) &&
+              ing.spec.rules.exists(rule,
+                has(rule.http) && has(rule.http.paths) &&
+                rule.http.paths.exists(path,
+                  has(path.backend) && has(path.backend.service) &&
+                  !variables.services.exists(svc,
+                    svc.metadata.namespace == ing.metadata.namespace &&
+                    svc.metadata.name == path.backend.service.name
+                  )
+                )
+              )
+            ).map(ing, ing.metadata.namespace + "/" + ing.metadata.name)
+        - name: ingressAnalysisSkipped
+          expression: '!variables.ingressFeasible'
+        - name: unusedNetworkPolicies
+          expression: |-
+            !variables.networkPolicyFeasible ? [] :
+            variables.networkPolicies.filter(np,
+              has(np.spec) && has(np.spec.podSelector) &&
+              has(np.spec.podSelector.matchLabels) &&
+              size(np.spec.podSelector.matchLabels) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == np.metadata.namespace &&
+                has(p.metadata.labels) &&
+                np.spec.podSelector.matchLabels.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == np.spec.podSelector.matchLabels[key]
+                )
+              )
+            ).map(np, np.metadata.namespace + "/" + np.metadata.name)
+        - name: networkPolicyAnalysisSkipped
+          expression: '!variables.networkPolicyFeasible'
+        - name: unusedPDBs
+          expression: |-
+            !variables.pdbFeasible ? [] :
+            variables.pdbs.filter(pdb,
+              has(pdb.spec) && has(pdb.spec.selector) &&
+              has(pdb.spec.selector.matchLabels) &&
+              size(pdb.spec.selector.matchLabels) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == pdb.metadata.namespace &&
+                has(p.metadata.labels) &&
+                pdb.spec.selector.matchLabels.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == pdb.spec.selector.matchLabels[key]
+                )
+              )
+            ).map(pdb, pdb.metadata.namespace + "/" + pdb.metadata.name)
+        - name: pdbAnalysisSkipped
+          expression: '!variables.pdbFeasible'
+      outputs:
+        - name: unusedIngresses
+          expression: 'expressions.unusedIngresses'
+        - name: ingressAnalysisSkipped
+          expression: 'expressions.ingressAnalysisSkipped'
+        - name: unusedNetworkPolicies
+          expression: 'expressions.unusedNetworkPolicies'
+        - name: networkPolicyAnalysisSkipped
+          expression: 'expressions.networkPolicyAnalysisSkipped'
+        - name: unusedPDBs
+          expression: 'expressions.unusedPDBs'
+        - name: pdbAnalysisSkipped
+          expression: 'expressions.pdbAnalysisSkipped'
+
+    # ── Step 8: Detect namespace issues ────────────────────────────
+    - name: detectNamespaceIssues
+      message: "Detect empty namespaces and resources in the default namespace"
+      dependsOn:
+        - collectClusterData
+        - collectPerNamespaceResources
+        - ensurePVDefaults
+      matchConditions:
+        - name: allNamespacesScan
+          expression: 'inputs.?namespace.orValue("") == ""'
+      expressions:
+        - name: systemNamespaces
+          expression: '["kube-system", "kube-public", "kube-node-lease", "default", "ottoflow"]'
+        - name: emptyNamespaces
+          expression: |-
+            variables.namespaces
+              .filter(ns,
+                !expressions.systemNamespaces.exists(s, s == ns.metadata.name) &&
+                !variables.pods.exists(p, p.metadata.namespace == ns.metadata.name) &&
+                !variables.deployments.exists(d, d.metadata.namespace == ns.metadata.name) &&
+                !variables.statefulsets.exists(ss, ss.metadata.namespace == ns.metadata.name) &&
+                !variables.services.exists(svc,
+                  svc.metadata.namespace == ns.metadata.name && svc.metadata.name != "kubernetes")
+              )
+              .map(ns, ns.metadata.name)
+        - name: defaultNamespaceResources
+          expression: |-
+            {
+              "pods": dyn(variables.pods.filter(p, p.metadata.namespace == "default").map(p, p.metadata.name)),
+              "deployments": dyn(variables.deployments.filter(d, d.metadata.namespace == "default").map(d, d.metadata.name)),
+              "services": dyn(variables.services.filter(s, s.metadata.namespace == "default" && s.metadata.name != "kubernetes").map(s, s.metadata.name)),
+              "configmaps": dyn(variables.configmaps.filter(cm, cm.metadata.namespace == "default" && cm.metadata.name != "kube-root-ca.crt").map(cm, cm.metadata.name))
+            }
+        - name: defaultNamespaceResourceCount
+          expression: |-
+            size(variables.pods.filter(p, p.metadata.namespace == "default")) +
+            size(variables.deployments.filter(d, d.metadata.namespace == "default")) +
+            size(variables.services.filter(s, s.metadata.namespace == "default" && s.metadata.name != "kubernetes")) +
+            size(variables.configmaps.filter(cm, cm.metadata.namespace == "default" && cm.metadata.name != "kube-root-ca.crt"))
+      outputs:
+        - name: emptyNamespaces
+          expression: 'expressions.emptyNamespaces'
+        - name: defaultNamespaceResources
+          expression: 'expressions.defaultNamespaceResources'
+        - name: defaultNamespaceResourceCount
+          expression: 'expressions.defaultNamespaceResourceCount'
+
+    # ── Step 9: Ensure namespace defaults (when step 8 is skipped) ─
+    - name: ensureNamespaceDefaults
+      message: "Set default values when namespace issues step is skipped"
+      dependsOn:
+        - detectNamespaceIssues
+      expressions:
+        - name: emptyNs
+          expression: 'variables.?emptyNamespaces.orValue([])'
+        - name: defaultNsResources
+          expression: 'variables.?defaultNamespaceResources.orValue({"pods": [], "deployments": [], "services": [], "configmaps": []})'
+        - name: defaultNsCount
+          expression: 'int(variables.?defaultNamespaceResourceCount.orValue(0))'
+      outputs:
+        - name: emptyNamespaces
+          expression: 'expressions.emptyNs'
+        - name: defaultNamespaceResources
+          expression: 'expressions.defaultNsResources'
+        - name: defaultNamespaceResourceCount
+          expression: 'expressions.defaultNsCount'
+
+    # ── Step 10: Build assessment summary ──────────────────────────
+    - name: buildAssessmentSummary
+      message: "Aggregate all findings into a structured assessment summary"
+      dependsOn:
+        - detectUnusedServices
+        - detectUnusedConfigMaps
+        - detectUnusedVolumes
+        - detectStaleWorkloads
+        - detectUnusedNetworkResources
+        - ensureNamespaceDefaults
+        - detectNamespaceIssues
+        - computeAnalysisFeasibility
+        - collectPerNamespaceResources
+      expressions:
+        - name: totalUnusedResources
+          expression: |-
+            size(variables.unusedServices) +
+            size(variables.unusedConfigMaps) +
+            size(variables.unusedPVCs) +
+            size(variables.unusedPVs) +
+            size(variables.unusedIngresses) +
+            size(variables.unusedNetworkPolicies) +
+            size(variables.unusedPDBs) +
+            size(variables.orphanPods) +
+            size(variables.idleDeployments) +
+            size(variables.idleStatefulSets) +
+            size(variables.staleReplicaSets) +
+            size(variables.crashLoopPods) +
+            size(variables.emptyNamespaces) +
+            int(variables.defaultNamespaceResourceCount)
+        # Categories skipped by computeAnalysisFeasibility's guard report "0 unused" above,
+        # which would silently look like a clean cluster. flaggedCategories/requiresInvestigation
+        # make that distinction explicit instead of letting it disappear into the count.
+        - name: flaggedCategories
+          expression: |-
+            (variables.serviceAnalysisSkipped ? ["Service"] : []) +
+            (variables.configMapAnalysisSkipped ? ["ConfigMap"] : []) +
+            (variables.pvcAnalysisSkipped ? ["PersistentVolumeClaim"] : []) +
+            (variables.ingressAnalysisSkipped ? ["Ingress"] : []) +
+            (variables.networkPolicyAnalysisSkipped ? ["NetworkPolicy"] : []) +
+            (variables.pdbAnalysisSkipped ? ["PodDisruptionBudget"] : []) +
+            (variables.collectionFailedCount > 0 ? ["Collection"] : [])
+        - name: requiresInvestigation
+          expression: 'size(expressions.flaggedCategories) > 0'
+        - name: flaggedCategoriesJSON
+          expression: |-
+            size(expressions.flaggedCategories) == 0
+              ? '[]'
+              : '["' + expressions.flaggedCategories.join('","') + '"]'
+        - name: collectionFailedNamespacesJSON
+          expression: |-
+            size(variables.collectionFailedNamespaces) == 0
+              ? '[]'
+              : '["' + variables.collectionFailedNamespaces.join('","') + '"]'
+        - name: summaryPart1
+          expression: |-
+            format('{"cluster":"%s","totalUnusedResources":%d,"requiresInvestigation":%s,"flaggedCategories":%s,"findings":{',
+              inputs.clusterName,
+              expressions.totalUnusedResources,
+              string(expressions.requiresInvestigation),
+              expressions.flaggedCategoriesJSON)
+        - name: summaryPart2
+          expression: |-
+            format('"unusedServices":%d,"unusedConfigMaps":%d,"unusedPVCs":%d,"unusedPVs":%d,"unusedIngresses":%d,"unusedNetworkPolicies":%d,"unusedPDBs":%d,',
+              size(variables.unusedServices),
+              size(variables.unusedConfigMaps),
+              size(variables.unusedPVCs),
+              size(variables.unusedPVs),
+              size(variables.unusedIngresses),
+              size(variables.unusedNetworkPolicies),
+              size(variables.unusedPDBs))
+        - name: summaryPart3
+          expression: |-
+            format('"orphanPods":%d,"idleDeployments":%d,"idleStatefulSets":%d,"staleReplicaSets":%d,"crashLoopPods":%d,"emptyNamespaces":%d,"defaultNamespaceResources":%d},',
+              size(variables.orphanPods),
+              size(variables.idleDeployments),
+              size(variables.idleStatefulSets),
+              size(variables.staleReplicaSets),
+              size(variables.crashLoopPods),
+              size(variables.emptyNamespaces),
+              int(variables.defaultNamespaceResourceCount))
+        # Raw (pre-filter) counts for the categories the feasibility guard can skip. When a
+        # category is skipped, its "unused*" count above is 0 but the raw count here shows
+        # the true scale — a runaway count that would otherwise report "0 unused" instead
+        # of the pathological total that made the category unsafe to cross-reference.
+        - name: summaryPart4
+          expression: |-
+            format('"rawCounts":{"services":%d,"configMaps":%d,"pvcs":%d,"ingresses":%d,"networkPolicies":%d,"podDisruptionBudgets":%d},"collection":{"failedNamespaceCount":%d,"failedNamespaces":%s}}',
+              variables.serviceCount,
+              variables.configMapCount,
+              variables.pvcCount,
+              variables.ingressCount,
+              variables.networkPolicyCount,
+              variables.pdbCount,
+              variables.collectionFailedCount,
+              expressions.collectionFailedNamespacesJSON)
+      outputs:
+        - name: assessmentSummary
+          expression: 'expressions.summaryPart1 + expressions.summaryPart2 + expressions.summaryPart3 + expressions.summaryPart4'
+        - name: totalUnusedResources
+          expression: 'expressions.totalUnusedResources'
+        - name: requiresInvestigation
+          expression: 'expressions.requiresInvestigation'
+        - name: flaggedCategories
+          expression: 'expressions.flaggedCategories'
+
+    # ── Step 10b: Cap per-category sample sizes fed to the LLM ─────
+    # Every category is truncated to its first N items here, not just the ones the
+    # feasibility guard can skip — a category that stayed under the O(n×pods) cost cap can
+    # still individually be large enough (e.g. thousands of stale ReplicaSets)
+    # to blow the model's context window on its own. Capping every category's
+    # prompt contribution to maxPromptItemsPerCategory bounds total prompt size
+    # by a small constant regardless of how pathological any single count gets —
+    # this is what prevents the Bedrock 413 "Input is too long" failure.
+    - name: buildReportSamples
+      message: "Cap per-category resource-name samples embedded in the LLM prompt"
+      dependsOn:
+        - buildAssessmentSummary
+        - detectUnusedNetworkResources
+        - detectNamespaceIssues
+        - detectStaleWorkloads
+        - ensureNamespaceDefaults
+        - detectUnusedServices
+        - detectUnusedConfigMaps
+        - detectUnusedVolumes
+        - collectPerNamespaceResources
+        - computeAnalysisFeasibility
+      expressions:
+        - name: maxItems
+          expression: 'int(inputs.?maxPromptItemsPerCategory.orValue("25"))'
+        - name: unusedServicesSample
+          expression: 'listSample(variables.unusedServices, expressions.maxItems)'
+        - name: unusedConfigMapsSample
+          expression: 'listSample(variables.unusedConfigMaps, expressions.maxItems)'
+        - name: unusedPVCsSample
+          expression: 'listSample(variables.unusedPVCs, expressions.maxItems)'
+        - name: unusedPVsSample
+          expression: 'listSample(variables.unusedPVs, expressions.maxItems)'
+        - name: unusedIngressesSample
+          expression: 'listSample(variables.unusedIngresses, expressions.maxItems)'
+        - name: unusedNetworkPoliciesSample
+          expression: 'listSample(variables.unusedNetworkPolicies, expressions.maxItems)'
+        - name: unusedPDBsSample
+          expression: 'listSample(variables.unusedPDBs, expressions.maxItems)'
+        - name: orphanPodsSample
+          expression: 'listSample(variables.orphanPods, expressions.maxItems)'
+        - name: idleDeploymentsSample
+          expression: 'listSample(variables.idleDeployments, expressions.maxItems)'
+        - name: idleStatefulSetsSample
+          expression: 'listSample(variables.idleStatefulSets, expressions.maxItems)'
+        - name: staleReplicaSetsSample
+          expression: 'listSample(variables.staleReplicaSets, expressions.maxItems)'
+        - name: crashLoopPodsSample
+          expression: 'listSample(variables.crashLoopPods, expressions.maxItems)'
+        - name: emptyNamespacesSample
+          expression: 'listSample(variables.emptyNamespaces, expressions.maxItems)'
+        - name: collectionFailedNamespacesSample
+          expression: 'listSample(variables.collectionFailedNamespaces, expressions.maxItems)'
+        # defaultNamespaceResources is a map of sub-lists (pods/deployments/services/configmaps),
+        # not a flat list, so it needs its own per-field listSample rather than reusing the
+        # flat-list pattern above — otherwise a default namespace holding thousands of objects
+        # would still blow the prompt uncapped, defeating this step's purpose.
+        - name: defaultNamespaceResourcesSample
+          expression: |-
+            {
+              "pods": dyn(listSample(variables.defaultNamespaceResources.pods, expressions.maxItems)),
+              "deployments": dyn(listSample(variables.defaultNamespaceResources.deployments, expressions.maxItems)),
+              "services": dyn(listSample(variables.defaultNamespaceResources.services, expressions.maxItems)),
+              "configmaps": dyn(listSample(variables.defaultNamespaceResources.configmaps, expressions.maxItems))
+            }
+        # Deterministic banner — always present in the final report regardless of what the
+        # LLM does with it, mirroring cost-analyzer's deterministic baseline-cost header.
+        # Two independent causes can each trigger this: a category skipped by the
+        # analysis-feasibility guard (pathological count), and/or namespaces that failed
+        # to collect even after retrying (transient network/tunnel issues, RBAC, etc.).
+        - name: skippedCategories
+          expression: 'variables.flaggedCategories.filter(c, c != "Collection")'
+        - name: analysisSkippedBanner
+          expression: |-
+            size(expressions.skippedCategories) == 0 ? '' :
+            format(
+              "> The following categories exceeded the safe-analysis threshold " +
+              "(%d items, or count×pods > %d) and were **not** cross-referenced against " +
+              "live pods — only their raw counts are reported below: %v. A count this far " +
+              "outside normal range likely indicates a leak (e.g. a CI pipeline creating " +
+              "objects without cleanup) rather than a reporting error. See " +
+              "`assessmentSummary.rawCounts` for the true scale.\n",
+              variables.maxCategorySize,
+              variables.maxComparisonCost,
+              expressions.skippedCategories
+            )
+        - name: collectionFailedBanner
+          expression: |-
+            variables.collectionFailedCount == 0 ? '' :
+            format(
+              "> %d namespace(s) failed to collect after retrying and were **excluded** " +
+              "from every finding below (a partial cluster view, not confirmation those " +
+              "namespaces are clean): %v. This usually means a transient network/tunnel " +
+              "issue reaching those namespaces, or an RBAC restriction — re-run the scan, " +
+              "and if it persists, check connectivity/permissions for these namespaces " +
+              "specifically.\n",
+              variables.collectionFailedCount,
+              expressions.collectionFailedNamespacesSample
+            )
+        - name: incompleteBanner
+          expression: |-
+            !variables.requiresInvestigation ? '' :
+            "> ⚠️ **Analysis Incomplete — Manual Investigation Required**\n" +
+            expressions.analysisSkippedBanner +
+            expressions.collectionFailedBanner +
+            "\n"
+      outputs:
+        - name: unusedServicesSample
+          expression: 'expressions.unusedServicesSample'
+        - name: unusedConfigMapsSample
+          expression: 'expressions.unusedConfigMapsSample'
+        - name: unusedPVCsSample
+          expression: 'expressions.unusedPVCsSample'
+        - name: unusedPVsSample
+          expression: 'expressions.unusedPVsSample'
+        - name: unusedIngressesSample
+          expression: 'expressions.unusedIngressesSample'
+        - name: unusedNetworkPoliciesSample
+          expression: 'expressions.unusedNetworkPoliciesSample'
+        - name: unusedPDBsSample
+          expression: 'expressions.unusedPDBsSample'
+        - name: orphanPodsSample
+          expression: 'expressions.orphanPodsSample'
+        - name: idleDeploymentsSample
+          expression: 'expressions.idleDeploymentsSample'
+        - name: idleStatefulSetsSample
+          expression: 'expressions.idleStatefulSetsSample'
+        - name: staleReplicaSetsSample
+          expression: 'expressions.staleReplicaSetsSample'
+        - name: crashLoopPodsSample
+          expression: 'expressions.crashLoopPodsSample'
+        - name: emptyNamespacesSample
+          expression: 'expressions.emptyNamespacesSample'
+        - name: defaultNamespaceResourcesSample
+          expression: 'expressions.defaultNamespaceResourcesSample'
+        - name: incompleteBanner
+          expression: 'expressions.incompleteBanner'
+
+    # ── Step 11: Generate cleanup report via LLM agent ─────────────
+    - name: generateReport
+      message: "Generate resource cleanup Markdown report"
+      failurePolicy: Continue
+      dependsOn:
+        - buildReportSamples
+        - buildAssessmentSummary
+        - ensureNamespaceDefaults
+      agentRef:
+        name: resource-hygiene-agent
+        namespace: ottoflow
+        additionalPrompts:
+          - |-
+            format(
+              "Produce one Markdown document only (no preamble).\n\n" +
+              "# Resource Cleanup Report — %s\n\n" +
+              "## Assessment Summary\n```json\n%s\n```\n\n" +
+              "## Unused Services (no matching pods)\n%v\n\n" +
+              "## Unused ConfigMaps (not referenced by pods)\n%v\n\n" +
+              "## Unused PVCs (bound but not mounted)\n%v\n\n" +
+              "## Unused PVs (available/released/failed)\n%v\n\n" +
+              "## Unused Ingresses (referencing non-existent services)\n%v\n\n" +
+              "## Unused Network Policies (no matching pods)\n%v\n\n" +
+              "## Unused PodDisruptionBudgets (no matching pods)\n%v\n\n" +
+              "## Orphan Pods (no owner references)\n%v\n\n" +
+              "## Idle Deployments (scaled to 0 replicas)\n%v\n\n" +
+              "## Idle StatefulSets (scaled to 0 replicas)\n%v\n\n" +
+              "## Stale ReplicaSets (0 replicas)\n%v\n\n" +
+              "## CrashLoopBackOff Pods\n%v\n\n" +
+              "## Empty Namespaces\n%v\n\n" +
+              "## Default Namespace Resources\n%v\n\n" +
+              "Analyze these findings and produce a comprehensive resource cleanup report.\n" +
+              "Some category lists above may be truncated with a \"...and N more\" marker — " +
+              "note this in the report rather than treating the visible items as the full set.\n" +
+              "Prioritize findings by severity: Critical (CrashLoopBackOff, orphan pods), " +
+              "High (unused PVCs/PVs, idle deployments), Medium (unused services/configmaps, " +
+              "stale replicasets), Low (empty namespaces, default namespace resources).\n" +
+              "For each category, explain the impact and provide specific cleanup recommendations.\n" +
+              "Group resources into: Safe to delete, Requires review, Requires caution.\n" +
+              "Map each finding to the corresponding Kyverno cleanup-policy category " +
+              "(unused ConfigMaps, orphaned Secrets, stale ReplicaSets, etc.).\n" +
+              "Include a summary table with resource counts per category.\n" +
+              "Never recommend automatic deletion without human review.\n",
+              inputs.clusterName,
+              variables.assessmentSummary,
+              variables.unusedServicesSample,
+              variables.unusedConfigMapsSample,
+              variables.unusedPVCsSample,
+              variables.unusedPVsSample,
+              variables.unusedIngressesSample,
+              variables.unusedNetworkPoliciesSample,
+              variables.unusedPDBsSample,
+              variables.orphanPodsSample,
+              variables.idleDeploymentsSample,
+              variables.idleStatefulSetsSample,
+              variables.staleReplicaSetsSample,
+              variables.crashLoopPodsSample,
+              variables.emptyNamespacesSample,
+              variables.defaultNamespaceResourcesSample
+            )
+      outputs:
+        - name: markdownReport
+          expression: 'variables.incompleteBanner + agentResponse'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: resource-hygiene-agent
+  namespace: ottoflow
+  labels:
+    app: resource-hygiene
+spec:
+  modelProvider: nirmata
+  prompt: |
+    You are a Kubernetes cluster hygiene specialist focused on resource cleanup and optimization.
+
+    You analyze clusters for unused, stale, and orphaned resources that waste capacity, create
+    security risks, or cause operational issues. Your recommendations follow the mark-then-validate
+    pattern commonly used by Kyverno cleanup policies.
+
+    Produce a comprehensive Markdown resource cleanup report with these sections:
+    1. **Executive Summary** — total unused resources found, estimated waste, top priorities
+    2. **Critical Findings** — CrashLoopBackOff pods, orphan pods requiring immediate attention
+    3. **Resource Cleanup by Category** — detailed breakdown with namespace/name for each type:
+       - Unused Services, ConfigMaps, PVCs, PVs, Ingresses, NetworkPolicies, PDBs
+       - Orphan Pods, Idle Deployments/StatefulSets, Stale ReplicaSets
+    4. **Namespace Hygiene** — empty namespaces, resources in default namespace
+    5. **Cleanup Recommendations** — prioritized action items grouped by safety level:
+       - Safe to delete: empty replicasets, unused PVs in Available state, empty namespaces
+       - Requires review: unused services, configmaps, PVCs, network policies, PDBs
+       - Requires caution: idle deployments/statefulsets (may be intentionally scaled down)
+    6. **Kyverno Policy Mapping** — map each finding to the corresponding Kyverno mark/validate
+       policy pair (e.g., mark-unused-services-policy.yaml / validate-unused-services-policy.yaml)
+    7. **Next Steps** — recommended workflow: deploy Kyverno policies → review reports → mark → delete
+
+    Use standard Markdown with tables where appropriate.
+    Always recommend human review before deletion. Never recommend automatic deletion.
+  outputExtraction:
+    type: text
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-hygiene-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-hygiene
+  inputValues: {}

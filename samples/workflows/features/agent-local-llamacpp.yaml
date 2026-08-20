@@ -1,0 +1,68 @@
+# Agent step using the local (llama.cpp) provider.
+#
+# Credential mechanism (verified against source, not assumed):
+#   - modelName is MANDATORY here: the local provider has no default model
+#     (internal/agent/default_executor.go getDefaultModel returns "" for
+#     providerLocal), unlike openai/azure-openai/google which fall back to
+#     a built-in default when modelName is omitted.
+#   - gollm's local provider talks to a llama.cpp server and reads its host
+#     from the LLAMACPP_HOST process environment variable INSIDE the
+#     agent-executor pod (default: http://127.0.0.1:8080/ when unset).
+#   - Agent.spec.config.endpoint is IGNORED by the local provider — it is
+#     only honored by azure-openai. Point the llama.cpp server elsewhere by
+#     setting LLAMACPP_HOST via the Helm chart's `agentExecutor.env`
+#     (charts/ottoflow/templates/agent-executor-deployment.yaml) instead.
+#   - Agent.spec.config.skipVerifySSL IS honored by the local provider.
+#
+# One-time setup (point at a llama.cpp server reachable from the
+# agent-executor pod):
+#   helm upgrade --install ottoflow charts/ottoflow \
+#     --namespace ottoflow \
+#     --set-json 'agentExecutor.env=[{"name":"LLAMACPP_HOST","value":"http://my-llamacpp-server:8080/"}]'
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: agent-local-llamacpp-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: question
+      description: "Question to ask"
+      default: "What is Kubernetes?"
+  steps:
+    - name: askAgent
+      message: "Ask agent (local llama.cpp provider)"
+      agentRef:
+        name: local-llamacpp-agent
+        additionalPrompts:
+          - 'format("Question: %s", inputs.question)'
+      outputs:
+        - name: answer
+          expression: 'agentResponse'
+  # Step outputs land in the shared `variables` map, hence variables.answer
+  outputs:
+    - name: result
+      expression: 'variables.answer'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: agent-local-llamacpp-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: agent-local-llamacpp-workflow
+  inputValues:
+    question: "Explain Kubernetes in simple terms"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: local-llamacpp-agent
+  namespace: ottoflow
+spec:
+  prompt: "You are a helpful AI assistant. Answer questions clearly and concisely."
+  modelProvider: local
+  modelName: qwen2.5-7b-instruct  # mandatory: local has no default model
+  outputExtraction:
+    type: text

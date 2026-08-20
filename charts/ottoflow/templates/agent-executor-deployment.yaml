@@ -1,0 +1,145 @@
+{{- if .Values.agentExecutor.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ottoflow.agentExecutor.fullname" . }}
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.agentExecutor.labels.n4" . }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.agentExecutor.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ottoflow.agentExecutor.selectorLabels.n6" . }}
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: agent-executor
+        {{- with .Values.agentExecutor.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ottoflow.agentExecutor.selectorLabels.n8" . }}
+        {{- with .Values.agentExecutor.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "ottoflow.imagePullSecrets" . | indent 6 }}
+      serviceAccountName: {{ include "ottoflow.agentExecutor.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.agentExecutor.podSecurityContext | nindent 8 }}
+      {{- with .Values.agentExecutor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentExecutor.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentExecutor.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: agent-executor
+        image: {{ include "ottoflow.agentExecutorImage" . }}
+        imagePullPolicy: {{ include "ottoflow.imagePullPolicy" . }}
+        {{- if .Values.agentExecutor.command }}
+        command:
+        {{- range .Values.agentExecutor.command }}
+        - {{ . }}
+        {{- end }}
+        {{- else }}
+        # ko builds binaries to /ko-app/<import-path-basename>
+        # For github.com/nirmata/ottoflow/cmd/agent-executor, binary is at /ko-app/agent-executor
+        command:
+        - /ko-app/agent-executor
+        {{- end }}
+        args:
+        - --agent-executor-caller-namespace={{ .Values.agentExecutor.callerNamespace | default (include "ottoflow.namespace" .) }}
+        {{- range .Values.agentExecutor.args }}
+        - {{ . }}
+        {{- end }}
+        securityContext:
+          {{- toYaml .Values.agentExecutor.securityContext | nindent 10 }}
+        {{- if or .Values.agentExecutor.tls.internal.enabled .Values.agentExecutor.tls.secretName }}
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /etc/tls
+          readOnly: true
+        {{- end }}
+        {{- if or .Values.agentExecutor.goMemLimit .Values.agentExecutor.env }}
+        env:
+        {{- if .Values.agentExecutor.goMemLimit }}
+        - name: GOMEMLIMIT
+          value: {{ .Values.agentExecutor.goMemLimit | quote }}
+        {{- end }}
+        {{- range .Values.agentExecutor.env }}
+        - name: {{ .name }}
+          {{- if .value }}
+          value: {{ .value | quote }}
+          {{- end }}
+          {{- if .valueFrom }}
+          valueFrom:
+            {{- toYaml .valueFrom | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+        ports:
+        - name: https
+          containerPort: {{ .Values.agentExecutor.service.port }}
+          protocol: TCP
+        {{- if .Values.agentExecutor.livenessProbe }}
+        livenessProbe:
+          {{- toYaml .Values.agentExecutor.livenessProbe | nindent 10 }}
+        {{- else }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: {{ .Values.agentExecutor.service.port }}
+            scheme: HTTPS
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 1
+          failureThreshold: 3
+        {{- end }}
+        {{- if .Values.agentExecutor.readinessProbe }}
+        readinessProbe:
+          {{- toYaml .Values.agentExecutor.readinessProbe | nindent 10 }}
+        {{- else }}
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: {{ .Values.agentExecutor.service.port }}
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        {{- end }}
+        {{- if .Values.agentExecutor.resources }}
+        resources:
+          {{- toYaml .Values.agentExecutor.resources | nindent 10 }}
+        {{- else }}
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        {{- end }}
+      {{- if or .Values.agentExecutor.tls.internal.enabled .Values.agentExecutor.tls.secretName }}
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: {{ .Values.agentExecutor.tls.secretName | default (include "ottoflow.agentExecutor.tlsSecretName" .) }}
+      {{- end }}
+      {{- if .Values.agentExecutor.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.agentExecutor.terminationGracePeriodSeconds }}
+      {{- end }}
+{{- end }}

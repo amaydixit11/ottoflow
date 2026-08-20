@@ -1,0 +1,40 @@
+# MCP server for AWS Price List API (EC2, EKS). Used by cloud-cost-daily workflow.
+# For in-cluster (EKS): ensure OttoFlow controller can run this command (e.g. image with
+# uv/uvx, or patch spec.transport.command to match your environment). Prefer IRSA
+# so AWS credentials come from the pod identity; otherwise set env from Secret.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: aws-pricing-mcp
+  namespace: default
+  labels:
+    app: cloud-cost
+spec:
+  transport:
+    type: stdio
+    # Use "uvx" if available in controller PATH; else patch to full path or container entrypoint.
+    # Pinned version for reproducibility; update by changing the version and re-testing.
+    command:
+      - "uvx"
+      - "awslabs.aws-pricing-mcp-server==0.1.0"
+  timeout: "60s"
+  auth:
+    type: none
+  env:
+    - name: FASTMCP_LOG_LEVEL
+      value: "ERROR"
+    # AWS_REGION can be overridden per workflow input (awsRegion).
+    - name: AWS_REGION
+      value: "us-east-1"
+    # For EKS with IRSA: omit AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
+    # For key-based auth: set from Secret (patch env with valueFrom.secretKeyRef if supported).
+    # - name: AWS_ACCESS_KEY_ID
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: aws-credentials
+    #       key: access-key-id
+    # - name: AWS_SECRET_ACCESS_KEY
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: aws-credentials
+    #       key: secret-access-key

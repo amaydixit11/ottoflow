@@ -1,0 +1,34 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: basic-test
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: message
+      description: "Test message"
+      default: "Hello"
+    - name: number
+      description: "Test number"
+      default: "42"
+  steps:
+    - name: testStep
+      message: "Basic test step"
+      expressions:
+        - name: combined
+          expression: inputs.message + " " + inputs.number
+      outputs:
+        - name: result
+          expression: expressions.combined
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: basic-test-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: basic-test
+  inputValues:
+    message: "Test"
+    number: "123"

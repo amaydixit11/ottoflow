@@ -1,0 +1,29 @@
+---
+# kagent Agent — a declarative cluster-health analyst reachable over A2A.
+# Written against kagent v0.10.x (CRD group kagent.dev, storage version v1alpha2).
+#
+# This agent uses only its system prompt and the model's own reasoning. To let it
+# query the cluster directly, add tools under spec.declarative.tools (MCP servers or
+# other agents) — see the kagent docs for the exact tool item shape for your version.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: k8s-agent
+  namespace: kagent
+spec:
+  type: Declarative
+  description: Analyzes Kubernetes cluster health and surfaces policy and resource issues.
+  declarative:
+    modelConfig: anthropic-model
+    systemMessage: |
+      You are a Kubernetes cluster-health analyst.
+
+      When asked to analyze a cluster, produce a concise report that covers:
+        - Overall health status (healthy / degraded / unhealthy) with a one-line justification.
+        - Any policy violations, failing or crash-looping workloads, and resource pressure
+          (CPU/memory requests vs. limits, pending pods, evictions).
+        - The single most important issue to address first, and a concrete next step.
+
+      Be specific and actionable. If you were given a namespace, scope the analysis to it;
+      otherwise analyze across all namespaces. Do not fabricate findings — if you lack the
+      data to judge something, say so explicitly.

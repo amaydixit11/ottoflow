@@ -1,0 +1,177 @@
+# Per-namespace cost data collector (Prometheus P95/P99 + waste indicators).
+# Canonical sample: used by cloud-cost-daily and cost-optimization-eks-optimized.
+# Apply from samples/steptemplates/ (do not duplicate under samples/workflows/).
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: cost-namespace-collector
+  namespace: ottoflow
+  labels:
+    app: cloud-cost
+spec:
+  description: >-
+    Collects per-namespace cost optimization data: pod specs, Prometheus P95/P99
+    metrics, over-provisioned pods, and waste indicators (idle deployments,
+    best-effort pods, orphan PVCs, missing limits, missing HPAs).
+  parameters:
+    - name: namespace
+      description: "Target namespace to analyze"
+      required: true
+    - name: overProvisionThreshold
+      description: "P99 utilization ratio below which a pod is over-provisioned"
+      default: '"0.3"'
+    - name: prometheusLookbackDays
+      description: "Days of Prometheus history for P95/P99"
+      default: '"7"'
+  step:
+    message: "Collect cost data for namespace {{.namespace}}"
+    expressions:
+      # ── Resource collection ──────────────────────────────
+      - name: pods
+        expression: 'dyn(resource.List("v1", "Pod", "{{.namespace}}", {})).items'
+      - name: deployments
+        expression: 'dyn(resource.List("apps/v1", "Deployment", "{{.namespace}}", {})).items'
+      - name: hpas
+        expression: 'dyn(resource.List("autoscaling/v2", "HorizontalPodAutoscaler", "{{.namespace}}", {})).items'
+      - name: pvcs
+        expression: 'dyn(resource.List("v1", "PersistentVolumeClaim", "{{.namespace}}", {})).items'
+
+      # ── Prometheus P95/P99 queries ────────────────────────
+      - name: nsFilter
+        expression: '"namespace=\"{{.namespace}}\","'
+      - name: lookback
+        expression: '"{{.prometheusLookbackDays}}" + "d"'
+      - name: p95CpuResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p99CpuResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p95MemResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.95, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+      - name: p99MemResult
+        expression: >-
+          prometheusMetrics(
+            'sum by (pod, namespace) (quantile_over_time(0.99, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+            "1s"
+          )
+
+      # ── Safe sample extraction ───────────────────────────
+      - name: p95CpuSamples
+        expression: 'expressions.?p95CpuResult.samples.orValue([])'
+      - name: p99CpuSamples
+        expression: 'expressions.?p99CpuResult.samples.orValue([])'
+      - name: p95MemSamples
+        expression: 'expressions.?p95MemResult.samples.orValue([])'
+      - name: p99MemSamples
+        expression: 'expressions.?p99MemResult.samples.orValue([])'
+
+      # ── Join metrics with pod specs ──────────────────────
+      - name: podIds
+        expression: >-
+          expressions.p95CpuSamples
+            .map(s, s.metric.namespace + "/" + s.metric.pod)
+            .distinct()
+      - name: podMetrics
+        expression: >-
+          expressions.podIds.map(pid, {
+            "podId": pid,
+            "p95CpuCores": dyn(expressions.p95CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p99CpuCores": dyn(expressions.p99CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p95MemBytes": dyn(expressions.p95MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "p99MemBytes": dyn(expressions.p99MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+            "requestedCPUCores": dyn(expressions.pods
+              .filter(p, p.metadata.namespace + "/" + p.metadata.name == pid)
+              .map(p, podTotalCPURequest(p)).sum()),
+            "requestedMemBytes": dyn(expressions.pods
+              .filter(p, p.metadata.namespace + "/" + p.metadata.name == pid)
+              .map(p, podTotalMemRequest(p)).sum())
+          }).filter(pm, pm.requestedCPUCores > 0.0 || pm.requestedMemBytes > 0.0)
+      - name: overProvisionedPods
+        expression: >-
+          expressions.podMetrics.filter(pm,
+            (pm.requestedCPUCores > 0.0 && pm.p99CpuCores > 0.0
+              && (pm.p99CpuCores / pm.requestedCPUCores) < double("{{.overProvisionThreshold}}"))
+            || (pm.requestedMemBytes > 0.0 && pm.p99MemBytes > 0.0
+              && (pm.p99MemBytes / pm.requestedMemBytes) < double("{{.overProvisionThreshold}}"))
+          )
+
+      # ── Waste detection ──────────────────────────────────
+      - name: idleDeployments
+        expression: >-
+          expressions.deployments
+            .filter(d, has(d.spec) && has(d.spec.replicas) && d.spec.replicas == 0)
+            .map(d, d.metadata.name)
+      - name: bestEffortPods
+        expression: >-
+          expressions.pods.filter(p,
+            has(p.spec.containers) &&
+            !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))
+          ).map(p, p.metadata.name)
+      - name: noLimitsPods
+        expression: >-
+          expressions.pods.filter(p,
+            has(p.spec.containers) &&
+            p.spec.containers.exists(c, !has(c.resources) || !has(c.resources.limits))
+          ).map(p, p.metadata.name)
+      - name: hpaTargets
+        expression: 'expressions.hpas.map(h, h.spec.scaleTargetRef.name)'
+      - name: deploymentsWithoutHPA
+        expression: >-
+          expressions.deployments
+            .filter(d, has(d.spec.replicas) && d.spec.replicas > 1
+              && !expressions.hpaTargets.exists(t, t == d.metadata.name))
+            .map(d, format("%s (replicas: %d)", d.metadata.name, d.spec.replicas))
+      - name: mountedPVCNames
+        expression: >-
+          expressions.pods
+            .filter(p, has(p.spec.volumes))
+            .map(p, p.spec.volumes.filter(v, has(v.persistentVolumeClaim)).map(v, v.persistentVolumeClaim.claimName))
+            .flatten().distinct()
+      - name: orphanPVCs
+        expression: >-
+          expressions.pvcs
+            .filter(pvc, has(pvc.status) && has(pvc.status.phase) && pvc.status.phase == "Bound")
+            .filter(pvc, !expressions.mountedPVCNames.exists(m, m == pvc.metadata.name))
+            .map(pvc, pvc.metadata.name)
+
+      # ── Totals (using helper functions) ─────────────────
+      - name: totalCPURequests
+        expression: 'expressions.pods.map(p, podTotalCPURequest(p)).sum()'
+      - name: totalMemRequests
+        expression: 'expressions.pods.map(p, podTotalMemRequest(p)).sum()'
+
+    outputs:
+      - name: namespace
+        expression: 'variables.ns'
+      - name: podCount
+        expression: 'size(expressions.pods)'
+      - name: podsAnalyzed
+        expression: 'size(expressions.podMetrics)'
+      - name: overProvisionedPods
+        expression: 'expressions.overProvisionedPods'
+      - name: overProvisionedCount
+        expression: 'size(expressions.overProvisionedPods)'
+      - name: totalCPURequestsCores
+        expression: 'expressions.totalCPURequests'
+      - name: totalMemRequestsGB
+        expression: 'expressions.totalMemRequests / 1073741824.0'
+      - name: wasteReport
+        value:
+          idleDeployments: expressions.idleDeployments
+          idleDeploymentCount: size(expressions.idleDeployments)
+          bestEffortPodCount: size(expressions.bestEffortPods)
+          noLimitsPodCount: size(expressions.noLimitsPods)
+          orphanPVCs: expressions.orphanPVCs
+          orphanPVCCount: size(expressions.orphanPVCs)
+          deploymentsWithoutHPA: expressions.deploymentsWithoutHPA

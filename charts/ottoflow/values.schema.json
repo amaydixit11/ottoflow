@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "type": "object",
+  "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": {
+          "type": "string",
+          "description": "Global Docker image registry"
+        },
+        "imagePullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Global image pull policy"
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Global image pull secrets"
+        }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": {
+              "type": "string",
+              "description": "Controller image registry"
+            },
+            "repository": {
+              "type": "string",
+              "description": "Controller image repository"
+            },
+            "tag": {
+              "type": "string",
+              "description": "Controller image tag"
+            },
+            "fullOverride": {
+              "type": "string",
+              "description": "Override full image name"
+            }
+          }
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of controller replicas"
+        },
+        "serviceAccount": {
+          "type": "object",
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "description": "Create service account"
+            },
+            "name": {
+              "type": "string",
+              "description": "Service account name"
+            },
+            "annotations": {
+              "type": "object",
+              "description": "Service account annotations"
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              }
+            },
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": ["image"]
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create RBAC resources"
+        },
+        "leaderElection": {
+          "type": "object",
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "description": "Create leader election RBAC"
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create NetworkPolicy"
+        }
+      }
+    },
+    "crds": {
+      "type": "object",
+      "properties": {
+        "install": {
+          "type": "boolean",
+          "description": "Install CRDs"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["install", "skip"],
+          "description": "CRD installation mode"
+        }
+      }
+    },
+    "namespace": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create namespace"
+        },
+        "name": {
+          "type": "string",
+          "description": "Namespace name"
+        }
+      }
+    }
+  }
+}

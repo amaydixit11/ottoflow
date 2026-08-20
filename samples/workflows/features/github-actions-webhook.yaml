@@ -1,0 +1,65 @@
+# GitHub Actions → OttoFlow webhook trigger example
+#
+# Prerequisites:
+#   1. Create the HMAC secret:
+#        kubectl create secret generic github-actions-webhook-secret \
+#          --namespace=ottoflow \
+#          --from-literal=hmac-key="$(openssl rand -base64 32)"
+#
+#   2. Store the same value as a GitHub Actions secret named OTTOFLOW_WEBHOOK_SECRET.
+#
+#   3. Add to your GitHub Actions workflow (.github/workflows/trigger-scan.yml):
+#
+#      - name: Trigger OttoFlow compliance scan
+#        run: |
+#          TIMESTAMP=$(date +%s)
+#          WEBHOOK_PATH="/webhooks/ottoflow/compliance-scan"
+#          BODY='{"data":{"namespace":"production","cluster_id":"${{ vars.CLUSTER_ID }}","severity":"high","run_id":"${{ github.run_id }}"}}'
+#          SIG=$(printf 'v1:%s:%s:%s' "${TIMESTAMP}" "${WEBHOOK_PATH}" "${BODY}" \
+#            | openssl dgst -sha256 -hmac "${{ secrets.OTTOFLOW_WEBHOOK_SECRET }}" \
+#            | awk '{print "sha256="$2}')
+#          curl -sf -X POST \
+#            -H "Content-Type: application/json" \
+#            -H "X-OttoFlow-Timestamp: ${TIMESTAMP}" \
+#            -H "X-OttoFlow-Signature: ${SIG}" \
+#            -d "${BODY}" \
+#            "https://ottoflow.example.com${WEBHOOK_PATH}"
+#
+# The workflow is fired only when severity="high". The run_id deduplicates
+# retries from the same GitHub Actions run.
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: compliance-scan
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: Target namespace to scan
+      required: true
+    - name: clusterId
+      description: Cluster identifier for the scan report
+      required: true
+
+  triggers:
+    - webhook:
+        secretRef:
+          name: github-actions-webhook-secret
+        # Only fire for high-severity events from GitHub Actions
+        celFilter: 'object.data.severity == "high"'
+        inputMapping:
+          namespace: object.data.namespace
+          clusterId: object.data.cluster_id
+        # Deduplicate by GitHub Actions run_id — retries within 10 minutes are dropped
+        dedupKey: object.data.run_id
+        dedupWindow: 10m
+
+  steps:
+    - name: scanNamespace
+      expressions:
+        - name: summary
+          expression: '"Compliance scan for " + inputs.namespace + " on " + inputs.clusterId'
+      outputs:
+        - name: scanSummary
+          expression: expressions.summary

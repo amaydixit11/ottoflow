@@ -1,0 +1,72 @@
+---
+# Sample: Call an external kagent instance via A2A protocol
+#
+# Prerequisites:
+#   - A running kagent instance accessible at https://kagent.example.com
+#   - A Secret containing the bearer token for authentication:
+#     kubectl create secret generic kagent-token -n default \
+#       --from-literal=token=<your-token>
+#   - (Optional) A Secret with a custom CA bundle if kagent uses a self-signed cert:
+#     kubectl create secret generic kagent-ca -n default \
+#       --from-file=ca.crt=/path/to/ca.crt
+#
+# Usage:
+#   ottoflow run kagent-integration --input clusterName=my-cluster
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: kagent-integration
+  namespace: default
+spec:
+  inputs:
+    - name: clusterName
+      description: Name of the cluster to analyze
+      required: true
+    - name: namespace
+      description: "Namespace to analyze (empty = all namespaces)"
+      default: ""
+
+  steps:
+    - name: analyzeCluster
+      message: Calling kagent to analyze cluster health
+      externalAgentRef:
+        url: "https://kagent.example.com"
+        protocol: a2a
+        prompt: >-
+          "Analyze the health of cluster " + inputs.clusterName +
+          (inputs.namespace != "" ? " in namespace " + inputs.namespace : " across all namespaces") +
+          ". Identify any policy violations, resource issues, or anomalies."
+        auth:
+          secretRef:
+            name: kagent-token
+            namespace: default
+            key: token
+        # Uncomment if kagent uses a self-signed certificate:
+        # caSecretRef:
+        #   name: kagent-ca
+        #   namespace: default
+        timeout: "10m"
+      outputs:
+        - name: healthSummary
+          expression: "a2aResult.artifacts[0].parts[0].text"
+
+    - name: reportResults
+      message: Summarize analysis results
+      dependsOn:
+        - analyzeCluster
+      expressions:
+        - name: report
+          expression: |
+            "Cluster health analysis for " + inputs.clusterName + ":\n" + variables.healthSummary
+      # expressions.* is workflow-global (one shared map in context.go), so the
+      # workflow output below could read expressions.report directly — this
+      # re-export is a naming choice, not a requirement.
+      outputs:
+        - name: report
+          expression: "expressions.report"
+
+  outputs:
+    - name: healthReport
+      expression: "variables.healthSummary"
+    - name: report
+      expression: "variables.report"

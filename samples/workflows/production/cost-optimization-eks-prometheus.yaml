@@ -1,0 +1,931 @@
+# Cost & Resource Optimization Advisor – Prometheus Edition (read-only)
+# Uses Prometheus P95/P99 historical metrics instead of point-in-time snapshots,
+# fetches real-time AWS pricing via MCP, analyzes right-sizing and waste,
+# generates an LLM-powered executive report, and optionally notifies Slack.
+#
+# Prerequisites:
+#   - Prometheus with cAdvisor metrics (container_cpu_usage_seconds_total,
+#     container_memory_working_set_bytes) in the monitoring namespace
+#   - AWS IAM permissions: pricing:* (free API, no cost incurred)
+#
+# Run:
+#   kubectl port-forward -n monitoring svc/prometheus-server 9090:80 &
+#   ottoflow run samples/workflows/production/cost-optimization-eks-prometheus.yaml \
+#     --prometheus-url http://localhost:9090 \
+#     --input awsRegion=us-west-2 --input namespace=kyverno
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: cost-optimization-eks-prometheus
+  namespace: ottoflow
+  annotations:
+    description: "Read-only cost advisor using Prometheus P95/P99 historical metrics, real-time AWS pricing via MCP, right-sizing analysis, and LLM-powered reporting"
+spec:
+  inputs:
+    - name: namespace
+      description: "Target namespace (leave empty for all namespaces)"
+    - name: awsRegion
+      description: "AWS region for pricing lookups (used if nodes lack topology.kubernetes.io/region label)"
+      default: "us-east-1"
+    - name: cpuCostPerCore
+      description: "Fallback monthly cost per vCPU core in USD if MCP pricing is unavailable"
+      default: "31.0"
+    - name: memoryCostPerGB
+      description: "Fallback monthly cost per GB of RAM in USD if MCP pricing is unavailable"
+      default: "3.5"
+    - name: slackWebhookUrl
+      description: "Slack incoming webhook URL for notifications (leave empty to skip)"
+    - name: overProvisionThreshold
+      description: "Utilization ratio below which a workload is considered overprovisioned (0.0-1.0)"
+      default: "0.3"
+    - name: prometheusLookbackDays
+      description: "Number of days of Prometheus history to analyze for P95/P99 calculations"
+      default: "7"
+
+  steps:
+    # ──────────────────────────────────────────────────────────────
+    # Step 1a: Collect Kubernetes resource specs
+    # ──────────────────────────────────────────────────────────────
+    - name: collectResources
+      message: "Collect pods, deployments, statefulsets, daemonsets, nodes, HPAs, and PVCs"
+      expressions:
+        - name: targetNs
+          expression: 'has(inputs.namespace) && inputs.namespace != "" ? inputs.namespace : ""'
+        - name: namespaces
+          expression: 'dyn(resource.List("v1", "Namespace", "", {})).items'
+        - name: namespaceNames
+          expression: >-
+            expressions.targetNs != ""
+              ? [expressions.targetNs]
+              : expressions.namespaces.map(ns, ns.metadata.name)
+        - name: pods
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("v1", "Pod", nsName, {})).items).flatten()
+              : []
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", "", {})).items'
+        - name: deployments
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "Deployment", nsName, {})).items).flatten()
+              : []
+        - name: statefulsets
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "StatefulSet", nsName, {})).items).flatten()
+              : []
+        - name: daemonsets
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "DaemonSet", nsName, {})).items).flatten()
+              : []
+        - name: nodes
+          expression: 'dyn(resource.List("v1", "Node", "", {})).items'
+        - name: hpas
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("autoscaling/v2", "HorizontalPodAutoscaler", nsName, {})).items).flatten()
+              : []
+        - name: pvcs
+          expression: >-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName, dyn(resource.List("v1", "PersistentVolumeClaim", nsName, {})).items).flatten()
+              : []
+      outputs:
+        - name: namespaceNames
+          expression: 'expressions.namespaceNames'
+        - name: pods
+          expression: 'expressions.pods'
+        - name: allPods
+          expression: 'expressions.allPods'
+        - name: deployments
+          expression: 'expressions.deployments'
+        - name: statefulsets
+          expression: 'expressions.statefulsets'
+        - name: daemonsets
+          expression: 'expressions.daemonsets'
+        - name: nodes
+          expression: 'expressions.nodes'
+        - name: hpas
+          expression: 'expressions.hpas'
+        - name: pvcs
+          expression: 'expressions.pvcs'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 1b: Extract EC2 instance types and region from nodes
+    # ──────────────────────────────────────────────────────────────
+    - name: extractNodeInfo
+      message: "Extract EC2 instance types and AWS region from cluster node labels"
+      dependsOn:
+        - collectResources
+      expressions:
+        - name: instanceTypes
+          expression: >-
+            variables.nodes
+              .filter(n, has(n.metadata.labels) && "node.kubernetes.io/instance-type" in n.metadata.labels)
+              .map(n, n.metadata.labels["node.kubernetes.io/instance-type"])
+              .distinct()
+        - name: nodeRegions
+          expression: >-
+            variables.nodes
+              .filter(n, has(n.metadata.labels) && "topology.kubernetes.io/region" in n.metadata.labels)
+              .map(n, n.metadata.labels["topology.kubernetes.io/region"])
+              .distinct()
+      outputs:
+        - name: instanceTypes
+          expression: 'expressions.instanceTypes'
+        - name: nodeRegion
+          expression: 'size(expressions.nodeRegions) > 0 ? expressions.nodeRegions[0] : inputs.awsRegion'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 1c: Fetch real-time EC2 pricing from AWS Price List API
+    # ──────────────────────────────────────────────────────────────
+    - name: fetchEC2Pricing
+      message: "Fetch on-demand EC2 pricing for the cluster's node instance types"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEC2"'
+          region: 'variables.nodeRegion'
+          filters: >-
+            [{"Field": "tenancy", "Value": "Shared", "Type": "TERM_MATCH"},
+             {"Field": "operatingSystem", "Value": "Linux", "Type": "TERM_MATCH"},
+             {"Field": "preInstalledSw", "Value": "NA", "Type": "TERM_MATCH"},
+             {"Field": "capacitystatus", "Value": "Used", "Type": "TERM_MATCH"}]
+          output_options: '{"pricing_terms": ["OnDemand"], "product_attributes": ["instanceType", "vcpu", "memory", "location"]}'
+      outputs:
+        - name: ec2PricingData
+          expression: 'toolResult'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 1d: Fetch real-time EKS pricing from AWS Price List API
+    # ──────────────────────────────────────────────────────────────
+    - name: fetchEKSPricing
+      message: "Fetch EKS cluster and control-plane pricing"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEKS"'
+          region: 'variables.nodeRegion'
+      outputs:
+        - name: eksPricingData
+          expression: 'toolResult'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 2: Query Prometheus for historical CPU/memory percentiles
+    # Replaces point-in-time Metrics Server snapshots with P95/P99
+    # over the configured lookback window (default 7 days).
+    # ──────────────────────────────────────────────────────────────
+    - name: collectPrometheusMetrics
+      message: "Query Prometheus for P95/P99 CPU and memory usage over lookback period"
+      dependsOn:
+        - collectResources
+      expressions:
+        - name: nsFilter
+          expression: >-
+            has(inputs.namespace) && inputs.namespace != ""
+              ? 'namespace="' + inputs.namespace + '",'
+              : ''
+        - name: lookback
+          expression: 'inputs.prometheusLookbackDays + "d"'
+
+        - name: p95CpuResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+        - name: p99CpuResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+        - name: p95MemResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (quantile_over_time(0.95, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+        - name: p99MemResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (quantile_over_time(0.99, container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+        - name: maxCpuResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (max_over_time(rate(container_cpu_usage_seconds_total{' + expressions.nsFilter + 'container!="POD",container!=""}[5m])[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+        - name: maxMemResult
+          expression: >-
+            prometheusMetrics(
+              'sum by (pod, namespace) (max_over_time(container_memory_working_set_bytes{' + expressions.nsFilter + 'container!="POD",container!=""}[' + expressions.lookback + ':5m]))',
+              "1s"
+            )
+      outputs:
+        - name: p95CpuSamples
+          expression: 'expressions.?p95CpuResult.samples.orValue([])'
+        - name: p99CpuSamples
+          expression: 'expressions.?p99CpuResult.samples.orValue([])'
+        - name: p95MemSamples
+          expression: 'expressions.?p95MemResult.samples.orValue([])'
+        - name: p99MemSamples
+          expression: 'expressions.?p99MemResult.samples.orValue([])'
+        - name: maxCpuSamples
+          expression: 'expressions.?maxCpuResult.samples.orValue([])'
+        - name: maxMemSamples
+          expression: 'expressions.?maxMemResult.samples.orValue([])'
+        - name: lookbackDays
+          expression: 'inputs.prometheusLookbackDays'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 3: Analyze right-sizing using P95/P99 historical data
+    # Uses: max(P99 * 1.3, P95 * 1.5, currentRequest * 0.25)
+    # ──────────────────────────────────────────────────────────────
+    - name: analyzeRightSizing
+      message: "Compare P95/P99 historical usage vs requested resources to find overprovisioned workloads"
+      dependsOn:
+        - collectResources
+        - collectPrometheusMetrics
+      expressions:
+        # Discover distinct pod IDs from Prometheus samples
+        - name: podIds
+          expression: >-
+            variables.p95CpuSamples
+              .map(s, s.metric.namespace + "/" + s.metric.pod)
+              .distinct()
+
+        # Combine Prometheus percentiles with pod spec requests
+        - name: podResourceComparison
+          expression: >-
+            expressions.podIds.map(pid, {
+              "podId": dyn(pid),
+              "p95CpuMilli":  dyn(variables.p95CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum() * 1000.0),
+              "p99CpuMilli":  dyn(variables.p99CpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum() * 1000.0),
+              "maxCpuMilli":  dyn(variables.maxCpuSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum() * 1000.0),
+              "p95MemBytes":  dyn(variables.p95MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+              "p99MemBytes":  dyn(variables.p99MemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+              "maxMemBytes":  dyn(variables.maxMemSamples.filter(s, s.metric.namespace + "/" + s.metric.pod == pid).map(s, s.value).sum()),
+              "pod": dyn(variables.pods.filter(p, p.metadata.namespace + "/" + p.metadata.name == pid))
+            })
+            .filter(c, size(c.pod) > 0 && has(c.pod[0].spec.containers))
+            .map(c, {
+              "podId": c.podId,
+              "p95CpuMilli": c.p95CpuMilli,
+              "p99CpuMilli": c.p99CpuMilli,
+              "maxCpuMilli": c.maxCpuMilli,
+              "p95MemBytes": c.p95MemBytes,
+              "p99MemBytes": c.p99MemBytes,
+              "maxMemBytes": c.maxMemBytes,
+              "requestedCPUMilli": dyn(c.pod[0].spec.containers.map(cont,
+                has(cont.resources) && has(cont.resources.requests) && has(cont.resources.requests.cpu)
+                  ? quantity(string(cont.resources.requests.cpu)).asApproximateFloat() * 1000.0
+                  : 0.0
+              ).sum()),
+              "requestedMemoryBytes": dyn(c.pod[0].spec.containers.map(cont,
+                has(cont.resources) && has(cont.resources.requests) && has(cont.resources.requests.memory)
+                  ? quantity(string(cont.resources.requests.memory)).asApproximateFloat()
+                  : 0.0
+              ).sum())
+            })
+            .filter(c, c.requestedCPUMilli > 0.0 || c.requestedMemoryBytes > 0.0)
+
+        # CPU over-provisioned: P99 utilization ratio < threshold
+        - name: cpuOverProvisionedPods
+          expression: >-
+            expressions.podResourceComparison
+              .filter(c,
+                double(c.requestedCPUMilli) > 0.0 && double(c.p99CpuMilli) > 0.0 &&
+                (double(c.p99CpuMilli) / double(c.requestedCPUMilli)) < double(inputs.overProvisionThreshold)
+              )
+              .map(c, {
+                "podId": c.podId,
+                "p95CpuMilli": c.p95CpuMilli,
+                "p99CpuMilli": c.p99CpuMilli,
+                "maxCpuMilli": c.maxCpuMilli,
+                "requestedCPUMilli": c.requestedCPUMilli,
+                "cpuUtilizationPct": dyn((double(c.p99CpuMilli) / double(c.requestedCPUMilli)) * 100.0),
+                "recommendedCPUMilli": dyn(
+                  (double(c.p99CpuMilli) * 1.3 > double(c.p95CpuMilli) * 1.5 ? double(c.p99CpuMilli) * 1.3 : double(c.p95CpuMilli) * 1.5)
+                    > double(c.requestedCPUMilli) * 0.25
+                  ? (double(c.p99CpuMilli) * 1.3 > double(c.p95CpuMilli) * 1.5 ? double(c.p99CpuMilli) * 1.3 : double(c.p95CpuMilli) * 1.5)
+                  : double(c.requestedCPUMilli) * 0.25
+                ),
+                "cpuSavingsMilli": dyn(double(c.requestedCPUMilli) - (
+                  (double(c.p99CpuMilli) * 1.3 > double(c.p95CpuMilli) * 1.5 ? double(c.p99CpuMilli) * 1.3 : double(c.p95CpuMilli) * 1.5)
+                    > double(c.requestedCPUMilli) * 0.25
+                  ? (double(c.p99CpuMilli) * 1.3 > double(c.p95CpuMilli) * 1.5 ? double(c.p99CpuMilli) * 1.3 : double(c.p95CpuMilli) * 1.5)
+                  : double(c.requestedCPUMilli) * 0.25
+                )),
+                "confidence": dyn(
+                  double(c.maxCpuMilli) > 0.0 && double(c.p99CpuMilli) > 0.0 && (double(c.maxCpuMilli) / double(c.p99CpuMilli)) < 2.0
+                    ? "high"
+                    : (double(c.maxCpuMilli) > 0.0 && double(c.p99CpuMilli) > 0.0 ? "medium" : "low")
+                ),
+                "p95MemBytes": c.p95MemBytes,
+                "p99MemBytes": c.p99MemBytes,
+                "maxMemBytes": c.maxMemBytes,
+                "requestedMemoryBytes": c.requestedMemoryBytes
+              })
+
+        # Memory over-provisioned: P99 utilization ratio < threshold
+        - name: memoryOverProvisionedPods
+          expression: >-
+            expressions.podResourceComparison
+              .filter(c,
+                double(c.requestedMemoryBytes) > 0.0 && double(c.p99MemBytes) > 0.0 &&
+                (double(c.p99MemBytes) / double(c.requestedMemoryBytes)) < double(inputs.overProvisionThreshold)
+              )
+              .map(c, {
+                "podId": c.podId,
+                "p95MemBytes": c.p95MemBytes,
+                "p99MemBytes": c.p99MemBytes,
+                "maxMemBytes": c.maxMemBytes,
+                "requestedMemoryBytes": c.requestedMemoryBytes,
+                "memoryUtilizationPct": dyn((double(c.p99MemBytes) / double(c.requestedMemoryBytes)) * 100.0),
+                "recommendedMemoryBytes": dyn(
+                  (double(c.p99MemBytes) * 1.3 > double(c.p95MemBytes) * 1.5 ? double(c.p99MemBytes) * 1.3 : double(c.p95MemBytes) * 1.5)
+                    > double(c.requestedMemoryBytes) * 0.25
+                  ? (double(c.p99MemBytes) * 1.3 > double(c.p95MemBytes) * 1.5 ? double(c.p99MemBytes) * 1.3 : double(c.p95MemBytes) * 1.5)
+                  : double(c.requestedMemoryBytes) * 0.25
+                ),
+                "memorySavingsBytes": dyn(double(c.requestedMemoryBytes) - (
+                  (double(c.p99MemBytes) * 1.3 > double(c.p95MemBytes) * 1.5 ? double(c.p99MemBytes) * 1.3 : double(c.p95MemBytes) * 1.5)
+                    > double(c.requestedMemoryBytes) * 0.25
+                  ? (double(c.p99MemBytes) * 1.3 > double(c.p95MemBytes) * 1.5 ? double(c.p99MemBytes) * 1.3 : double(c.p95MemBytes) * 1.5)
+                  : double(c.requestedMemoryBytes) * 0.25
+                )),
+                "confidence": dyn(
+                  double(c.maxMemBytes) > 0.0 && double(c.p99MemBytes) > 0.0 && (double(c.maxMemBytes) / double(c.p99MemBytes)) < 2.0
+                    ? "high"
+                    : (double(c.maxMemBytes) > 0.0 && double(c.p99MemBytes) > 0.0 ? "medium" : "low")
+                )
+              })
+
+        # Combine into a single overprovisioned list (union by podId)
+        - name: overProvisionedPodIds
+          expression: >-
+            (expressions.cpuOverProvisionedPods.map(p, p.podId)
+              + expressions.memoryOverProvisionedPods.map(p, p.podId)).distinct()
+        - name: overProvisionedPods
+          expression: >-
+            expressions.overProvisionedPodIds.map(podId, {
+              "podId": podId,
+              "cpu": dyn(expressions.cpuOverProvisionedPods.filter(p, p.podId == podId).map(p, {
+                "p95Milli": p.p95CpuMilli,
+                "p99Milli": p.p99CpuMilli,
+                "maxMilli": p.maxCpuMilli,
+                "requestedMilli": p.requestedCPUMilli,
+                "utilizationPct": p.cpuUtilizationPct,
+                "recommendedMilli": p.recommendedCPUMilli,
+                "savingsMilli": p.cpuSavingsMilli,
+                "confidence": p.confidence
+              })),
+              "memory": dyn(expressions.memoryOverProvisionedPods.filter(p, p.podId == podId).map(p, {
+                "p95Bytes": p.p95MemBytes,
+                "p99Bytes": p.p99MemBytes,
+                "maxBytes": p.maxMemBytes,
+                "requestedBytes": p.requestedMemoryBytes,
+                "utilizationPct": p.memoryUtilizationPct,
+                "recommendedBytes": p.recommendedMemoryBytes,
+                "savingsBytes": p.memorySavingsBytes,
+                "confidence": p.confidence
+              }))
+            })
+
+        # Aggregate savings
+        - name: totalCPUSavingsMilli
+          expression: >-
+            expressions.cpuOverProvisionedPods
+              .map(p, p.cpuSavingsMilli > 0.0 ? p.cpuSavingsMilli : dyn(0.0))
+              .sum()
+        - name: totalCPUSavingsCores
+          expression: 'double(expressions.totalCPUSavingsMilli) / 1000.0'
+        - name: totalMemorySavingsBytes
+          expression: >-
+            expressions.memoryOverProvisionedPods
+              .map(p, p.memorySavingsBytes > 0.0 ? p.memorySavingsBytes : dyn(0.0))
+              .sum()
+        - name: totalMemorySavingsGB
+          expression: 'double(expressions.totalMemorySavingsBytes) / 1073741824.0'
+      outputs:
+        - name: overProvisionedPods
+          expression: 'expressions.overProvisionedPods'
+        - name: overProvisionedCount
+          expression: 'size(expressions.overProvisionedPods)'
+        - name: totalCPUSavingsCores
+          expression: 'expressions.totalCPUSavingsCores'
+        - name: totalMemorySavingsGB
+          expression: 'expressions.totalMemorySavingsGB'
+        - name: totalPodsAnalyzed
+          expression: 'size(expressions.podResourceComparison)'
+        - name: cpuOverProvisionedCount
+          expression: 'size(expressions.cpuOverProvisionedPods)'
+        - name: memoryOverProvisionedCount
+          expression: 'size(expressions.memoryOverProvisionedPods)'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 4: Detect waste sources and anti-patterns
+    # ──────────────────────────────────────────────────────────────
+    - name: detectWaste
+      message: "Identify idle deployments, BestEffort pods, missing limits, stale images, and orphan PVCs"
+      dependsOn:
+        - collectResources
+      expressions:
+        - name: idleDeployments
+          expression: >-
+            variables.deployments.filter(d,
+              has(d.spec) && has(d.spec.replicas) && d.spec.replicas == 0
+            ).map(d, format("%s/%s", d.metadata.namespace, d.metadata.name))
+        - name: bestEffortPods
+          expression: >-
+            variables.pods.filter(p,
+              has(p.spec.containers) &&
+              !p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))
+            ).map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+        - name: noLimitsPods
+          expression: >-
+            variables.pods.filter(p,
+              has(p.spec.containers) &&
+              p.spec.containers.exists(c,
+                !has(c.resources) || !has(c.resources.limits) || c.resources.limits == null
+              )
+            ).map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+        - name: latestTagPods
+          expression: >-
+            variables.pods.filter(p,
+              has(p.spec.containers) &&
+              p.spec.containers.exists(c, has(c.image) && (c.image.endsWith(":latest") || !c.image.contains(":")))
+            ).map(p, format("%s/%s", p.metadata.namespace, p.metadata.name))
+        - name: mountedPVCNames
+          expression: >-
+            variables.pods
+              .filter(p, has(p.spec.volumes))
+              .map(p, p.spec.volumes
+                .filter(v, has(v.persistentVolumeClaim))
+                .map(v, p.metadata.namespace + "/" + v.persistentVolumeClaim.claimName)
+              ).flatten().distinct()
+        - name: orphanPVCs
+          expression: >-
+            variables.pvcs
+              .filter(pvc, has(pvc.status) && has(pvc.status.phase) && pvc.status.phase == "Bound")
+              .filter(pvc,
+                !expressions.mountedPVCNames.exists(m, m == pvc.metadata.namespace + "/" + pvc.metadata.name)
+              )
+              .map(pvc, {
+                "name": format("%s/%s", pvc.metadata.namespace, pvc.metadata.name),
+                "storage": has(pvc.spec.resources) && has(pvc.spec.resources.requests) && has(pvc.spec.resources.requests.storage)
+                  ? string(pvc.spec.resources.requests.storage) : "unknown"
+              })
+        - name: hpaTargets
+          expression: >-
+            variables.hpas.map(h,
+              h.metadata.namespace + "/" + h.spec.scaleTargetRef.name
+            )
+        - name: deploymentsWithoutHPA
+          expression: >-
+            variables.deployments
+              .filter(d,
+                has(d.spec.replicas) && d.spec.replicas > 1 &&
+                !expressions.hpaTargets.exists(t, t == d.metadata.namespace + "/" + d.metadata.name)
+              )
+              .map(d, format("%s/%s (replicas: %d)", d.metadata.namespace, d.metadata.name, d.spec.replicas))
+      outputs:
+        - name: wasteReport
+          value:
+            idleDeployments: expressions.idleDeployments
+            idleDeploymentCount: size(expressions.idleDeployments)
+            bestEffortPods: expressions.bestEffortPods
+            bestEffortPodCount: size(expressions.bestEffortPods)
+            noLimitsPodCount: size(expressions.noLimitsPods)
+            latestTagPodCount: size(expressions.latestTagPods)
+            latestTagPods: expressions.latestTagPods
+            orphanPVCs: expressions.orphanPVCs
+            orphanPVCCount: size(expressions.orphanPVCs)
+            deploymentsWithoutHPA: expressions.deploymentsWithoutHPA
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 5: Analyze cluster-level utilization
+    # ──────────────────────────────────────────────────────────────
+    - name: analyzeClusterUtilization
+      message: "Calculate cluster capacity, allocatable resources, total requests, and utilization percentages"
+      dependsOn:
+        - collectResources
+      expressions:
+        - name: totalNodeCPU
+          expression: >-
+            variables.nodes.filter(n, has(n.status.capacity) && has(n.status.capacity.cpu)).map(n,
+              quantity(string(n.status.capacity.cpu)).asApproximateFloat()
+            ).sum()
+        - name: totalNodeMemoryBytes
+          expression: >-
+            variables.nodes.filter(n, has(n.status.capacity) && has(n.status.capacity.memory)).map(n,
+              quantity(string(n.status.capacity.memory)).asApproximateFloat()
+            ).sum()
+        - name: allocatableCPU
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.cpu)).map(n,
+              quantity(string(n.status.allocatable.cpu)).asApproximateFloat()
+            ).sum()
+        - name: allocatableMemoryBytes
+          expression: >-
+            variables.nodes.filter(n, has(n.status.allocatable) && has(n.status.allocatable.memory)).map(n,
+              quantity(string(n.status.allocatable.memory)).asApproximateFloat()
+            ).sum()
+        - name: totalCPURequests
+          expression: >-
+            variables.allPods.filter(p, has(p.spec.containers)).map(p,
+              p.spec.containers.map(c,
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.cpu)
+                  ? quantity(string(c.resources.requests.cpu)).asApproximateFloat()
+                  : 0.0
+              )
+            ).flatten().sum()
+        - name: totalMemoryRequests
+          expression: >-
+            variables.allPods.filter(p, has(p.spec.containers)).map(p,
+              p.spec.containers.map(c,
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.memory)
+                  ? quantity(string(c.resources.requests.memory)).asApproximateFloat()
+                  : 0.0
+              )
+            ).flatten().sum()
+        - name: cpuRequestUtilPct
+          expression: >-
+            expressions.allocatableCPU > 0.0
+              ? (expressions.totalCPURequests / expressions.allocatableCPU) * 100.0
+              : 0.0
+        - name: memoryRequestUtilPct
+          expression: >-
+            expressions.allocatableMemoryBytes > 0.0
+              ? (expressions.totalMemoryRequests / expressions.allocatableMemoryBytes) * 100.0
+              : 0.0
+      outputs:
+        - name: clusterUtilization
+          value:
+            totalNodes: size(variables.nodes)
+            totalPods: size(variables.allPods)
+            namespacePods: size(variables.pods)
+            targetNamespace: 'has(inputs.namespace) && inputs.namespace != "" ? inputs.namespace : "(all)"'
+            capacity:
+              cpu: format("%.2f cores", expressions.totalNodeCPU)
+              memory: format("%.2f GB", expressions.totalNodeMemoryBytes / 1073741824.0)
+            allocatable:
+              cpu: format("%.2f cores", expressions.allocatableCPU)
+              memory: format("%.2f GB", expressions.allocatableMemoryBytes / 1073741824.0)
+            totalRequests:
+              cpu: format("%.2f cores", expressions.totalCPURequests)
+              memory: format("%.2f GB", expressions.totalMemoryRequests / 1073741824.0)
+            utilization:
+              cpuRequestPercent: format("%.1f%%", expressions.cpuRequestUtilPct)
+              memoryRequestPercent: format("%.1f%%", expressions.memoryRequestUtilPct)
+        - name: allocatableCPUCores
+          expression: 'expressions.allocatableCPU'
+        - name: allocatableMemoryGB
+          expression: 'expressions.allocatableMemoryBytes / 1073741824.0'
+        - name: totalCPURequestsCores
+          expression: 'expressions.totalCPURequests'
+        - name: totalMemoryRequestsGB
+          expression: 'expressions.totalMemoryRequests / 1073741824.0'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 6: Compute projected monthly savings
+    # ──────────────────────────────────────────────────────────────
+    - name: computeSavings
+      message: "Calculate projected monthly savings from right-sizing and waste elimination"
+      dependsOn:
+        - analyzeRightSizing
+        - detectWaste
+        - analyzeClusterUtilization
+        - fetchEC2Pricing
+        - fetchEKSPricing
+      expressions:
+        - name: cpuSavingsUSD
+          expression: 'variables.totalCPUSavingsCores * double(inputs.cpuCostPerCore)'
+        - name: memorySavingsUSD
+          expression: 'variables.totalMemorySavingsGB * double(inputs.memoryCostPerGB)'
+        - name: rightSizingSavingsUSD
+          expression: 'expressions.cpuSavingsUSD + expressions.memorySavingsUSD'
+        - name: idleDeploymentWasteUSD
+          expression: >-
+            double(variables.wasteReport.idleDeploymentCount) * 0.25 * double(inputs.cpuCostPerCore)
+        - name: totalMonthlySavingsUSD
+          expression: 'expressions.rightSizingSavingsUSD + expressions.idleDeploymentWasteUSD'
+        - name: summaryPart1
+          expression: >-
+            format('{"cluster":{"nodes":%d,"totalPods":%d,"namespacePods":%d,"targetNamespace":"%s","allocatableCPU":"%.2f cores","allocatableMemory":"%.2f GB","cpuRequestUtil":"%s","memoryRequestUtil":"%s"}',
+              int(variables.clusterUtilization.totalNodes),
+              int(variables.clusterUtilization.totalPods),
+              int(variables.clusterUtilization.namespacePods),
+              variables.clusterUtilization.targetNamespace,
+              variables.allocatableCPUCores,
+              variables.allocatableMemoryGB,
+              variables.clusterUtilization.utilization.cpuRequestPercent,
+              variables.clusterUtilization.utilization.memoryRequestPercent
+            )
+        - name: summaryPart2
+          expression: >-
+            format(',"rightSizing":{"podsAnalyzed":%d,"overProvisionedCount":%d,"cpuOverProvisioned":%d,"memoryOverProvisioned":%d,"cpuSavingsCores":"%.2f","cpuSavingsUSD":"$%.2f","memorySavingsGB":"%.2f","memorySavingsUSD":"$%.2f"}',
+              int(variables.totalPodsAnalyzed),
+              int(variables.overProvisionedCount),
+              int(variables.cpuOverProvisionedCount),
+              int(variables.memoryOverProvisionedCount),
+              variables.totalCPUSavingsCores,
+              expressions.cpuSavingsUSD,
+              variables.totalMemorySavingsGB,
+              expressions.memorySavingsUSD
+            )
+        - name: summaryPart3
+          expression: >-
+            format(',"waste":{"idleDeployments":%d,"bestEffortPods":%d,"noLimitsPods":%d,"latestTagPods":%d,"orphanPVCs":%d,"deploymentsWithoutHPA":%d,"idleWasteUSD":"$%.2f"}',
+              int(variables.wasteReport.idleDeploymentCount),
+              int(variables.wasteReport.bestEffortPodCount),
+              int(variables.wasteReport.noLimitsPodCount),
+              int(variables.wasteReport.latestTagPodCount),
+              int(variables.wasteReport.orphanPVCCount),
+              size(variables.wasteReport.deploymentsWithoutHPA),
+              expressions.idleDeploymentWasteUSD
+            )
+        - name: summaryPart4
+          expression: >-
+            format(',"savings":{"cpuRightSizingUSD":"$%.2f","memoryRightSizingUSD":"$%.2f","rightSizingTotalUSD":"$%.2f","idleWasteUSD":"$%.2f","totalMonthlySavingsUSD":"$%.2f"}}',
+              expressions.cpuSavingsUSD,
+              expressions.memorySavingsUSD,
+              expressions.rightSizingSavingsUSD,
+              expressions.idleDeploymentWasteUSD,
+              expressions.totalMonthlySavingsUSD
+            )
+        - name: assessmentSummary
+          expression: 'expressions.summaryPart1 + expressions.summaryPart2 + expressions.summaryPart3 + expressions.summaryPart4'
+        - name: topOverProvisionedPods
+          expression: >-
+            variables.overProvisionedPods
+              .filter(p,
+                size(p.cpu) > 0
+                  ? size(variables.overProvisionedPods.filter(other,
+                      size(other.cpu) > 0 && other.cpu[0].savingsMilli > p.cpu[0].savingsMilli
+                    )) < 20
+                  : size(variables.overProvisionedPods.filter(other,
+                      size(other.memory) > 0 && size(p.memory) > 0 && other.memory[0].savingsBytes > p.memory[0].savingsBytes
+                    )) < 20
+              )
+      outputs:
+        - name: assessmentSummary
+          expression: 'expressions.assessmentSummary'
+        - name: totalMonthlySavingsUSD
+          expression: 'expressions.totalMonthlySavingsUSD'
+        - name: rightSizingSavingsUSD
+          expression: 'expressions.rightSizingSavingsUSD'
+        - name: idleDeploymentWasteUSD
+          expression: 'expressions.idleDeploymentWasteUSD'
+        - name: topOverProvisionedPods
+          expression: 'expressions.topOverProvisionedPods'
+        - name: ec2PricingData
+          expression: 'variables.ec2PricingData'
+        - name: eksPricingData
+          expression: 'variables.eksPricingData'
+        - name: instanceTypes
+          expression: 'variables.instanceTypes'
+        - name: nodeRegion
+          expression: 'variables.nodeRegion'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 7: Generate executive report via LLM agent
+    # ──────────────────────────────────────────────────────────────
+    - name: generateReport
+      message: "Generate an executive-friendly cost optimization report"
+      dependsOn:
+        - computeSavings
+        - analyzeRightSizing
+        - analyzeClusterUtilization
+        - collectPrometheusMetrics
+        - detectWaste
+      agentRef:
+        name: cost-optimization-prometheus-agent
+        additionalPrompts:
+          - >-
+            format(
+              "Produce an executive cost optimization report for this Kubernetes cluster.\n\n" +
+              "## Assessment Data\n%s\n\n" +
+              "## Overprovisioned Pods (top 20 by savings, %d total)\n%v\n\n" +
+              "## Waste Sources\n" +
+              "Idle Deployments: %v\n" +
+              "Orphan PVCs: %v\n" +
+              "Deployments Without HPA: %v\n\n" +
+              "## Cluster Utilization\n%v\n",
+              variables.assessmentSummary,
+              int(variables.overProvisionedCount),
+              variables.topOverProvisionedPods,
+              variables.wasteReport.idleDeployments,
+              variables.wasteReport.orphanPVCs,
+              variables.wasteReport.deploymentsWithoutHPA,
+              variables.clusterUtilization
+            )
+            +
+            format(
+              "\n## Real-Time AWS Pricing (from AWS Price List API)\n" +
+              "Region: %s\n" +
+              "Node Instance Types: %v\n\n" +
+              "### EC2 On-Demand Pricing\n%v\n\n" +
+              "### EKS Pricing\n%v\n\n" +
+              "Fallback cost assumptions (use only if AWS pricing data above is empty): " +
+              "$%s/core/month CPU, $%s/GB/month memory.\n\n",
+              variables.nodeRegion,
+              variables.instanceTypes,
+              variables.ec2PricingData,
+              variables.eksPricingData,
+              inputs.cpuCostPerCore,
+              inputs.memoryCostPerGB
+            )
+            +
+            format(
+              "## Methodology\n" +
+              "Recommendations are based on Prometheus P95/P99 percentile data over a %s-day lookback window.\n" +
+              "Each recommendation includes a confidence level (high/medium/low) based on peak-to-P99 variance.\n" +
+              "Formula: recommended = max(P99 * 1.3, P95 * 1.5, currentRequest * 25%%)\n\n",
+              variables.lookbackDays
+            )
+            +
+            "IMPORTANT: Use the real-time AWS pricing data above to calculate accurate costs. " +
+            "Map each node's instance type to its on-demand hourly rate and derive per-vCPU and per-GB costs. " +
+            "If the pricing data includes Reserved Instance or Savings Plan alternatives, highlight potential additional savings.\n\n" +
+            "Structure the report with these sections:\n" +
+            "1. Executive Summary with total projected monthly savings as the headline\n" +
+            "2. Methodology (explain P95/P99 percentile-based analysis and lookback window)\n" +
+            "3. AWS Pricing Context (instance types, on-demand rates, region)\n" +
+            "4. Right-Sizing Recommendations (prioritized by savings, include confidence level for each)\n" +
+            "5. Waste Cleanup Opportunities\n" +
+            "6. Anti-Pattern Alerts (BestEffort pods, missing limits, latest tags)\n" +
+            "7. Cluster Utilization Summary\n" +
+            "8. Reserved Instance / Savings Plan Opportunities\n" +
+            "9. Recommended Next Steps\n\n" +
+            "For each recommendation include: priority (Critical/High/Medium/Low), confidence (high/medium/low), projected savings, and implementation guidance.\n" +
+            "NEVER recommend automatically applying changes. Always recommend review first."
+      outputs:
+        - name: formattedReport
+          expression: 'agentResponse'
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 8: Notify Slack (skipped if no webhook URL provided)
+    # ──────────────────────────────────────────────────────────────
+    - name: notifySlack
+      message: "Send savings summary to Slack"
+      dependsOn:
+        - generateReport
+        - computeSavings
+        - collectPrometheusMetrics
+        - analyzeRightSizing
+        - detectWaste
+      matchConditions:
+        - name: slackConfigured
+          expression: 'has(inputs.slackWebhookUrl) && inputs.slackWebhookUrl != ""'
+      expressions:
+        - name: slackText
+          expression: >-
+            format(
+              '*Cost Optimization Report (Prometheus + AWS Pricing)*\n\nProjected Monthly Savings: *$%.2f/mo*\n\n' +
+              'Right-sizing: $%.2f | Idle cleanup: $%.2f\n' +
+              'Overprovisioned pods: %d | Idle deployments: %d | Orphan PVCs: %d\n' +
+              'BestEffort pods: %d | Missing limits: %d\n\n' +
+              '_Based on P95/P99 Prometheus metrics over %s days + real-time AWS pricing._',
+              variables.totalMonthlySavingsUSD,
+              variables.rightSizingSavingsUSD,
+              variables.idleDeploymentWasteUSD,
+              int(variables.overProvisionedCount),
+              int(variables.wasteReport.idleDeploymentCount),
+              int(variables.wasteReport.orphanPVCCount),
+              int(variables.wasteReport.bestEffortPodCount),
+              int(variables.wasteReport.noLimitsPodCount),
+              variables.lookbackDays
+            )
+        - name: slackResponse
+          expression: >-
+            http.Post(inputs.slackWebhookUrl, {"text": expressions.slackText}, {"Content-Type": "application/json"})
+      outputs:
+        # http.Post returns non-2xx as data, not an error — check status explicitly.
+        - name: slackNotified
+          expression: 'expressions.slackResponse.statusCode >= 200 && expressions.slackResponse.statusCode < 300'
+
+  outputs:
+    - name: report
+      expression: 'variables.formattedReport'
+    - name: assessmentSummary
+      expression: 'variables.assessmentSummary'
+    - name: totalMonthlySavingsUSD
+      expression: 'variables.totalMonthlySavingsUSD'
+    - name: wasteReport
+      expression: 'variables.wasteReport'
+    - name: clusterUtilization
+      expression: 'variables.clusterUtilization'
+    - name: overProvisionedPods
+      expression: 'variables.overProvisionedPods'
+    - name: ec2PricingData
+      expression: 'variables.ec2PricingData'
+    - name: eksPricingData
+      expression: 'variables.eksPricingData'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: cost-optimization-prometheus-agent
+  namespace: ottoflow
+spec:
+  modelProvider: anthropic
+  prompt: |
+    You are a Kubernetes FinOps advisor specializing in cost optimization and resource efficiency.
+
+    Your role is to analyze cluster resource data together with real-time AWS pricing
+    information (EC2 and EKS) and produce an executive cost optimization report.
+
+    CRITICAL: The right-sizing data you receive is based on Prometheus P95/P99 percentile
+    metrics collected over a multi-day lookback window -- NOT a single point-in-time snapshot.
+    This means the recommendations account for workload variability and burst patterns.
+
+    Each recommendation includes a confidence level:
+    - HIGH confidence: peak usage is within 2x of P99 (stable workload, safe to act on)
+    - MEDIUM confidence: peak usage exceeds 2x P99 (bursty workload, recommend monitoring before acting)
+    - LOW confidence: insufficient historical data (new pod or missing metrics, defer action)
+
+    The recommendation formula is: max(P99 * 1.3, P95 * 1.5, currentRequest * 25%)
+    - P99 * 1.3 ensures 99% of observed usage is covered with 30% headroom
+    - P95 * 1.5 provides wider headroom for the 95th percentile
+    - currentRequest * 25% sets a safety floor (never recommend below 25% of current)
+
+    You will receive real-time pricing data from the AWS Price List API. Use this data to:
+    - Map each node instance type to its actual on-demand hourly rate
+    - Derive accurate per-vCPU and per-GB-memory costs from the instance pricing
+    - Calculate monthly costs using: hourly_rate * 730 hours/month
+    - Identify whether cheaper instance families could satisfy the same workload
+    - Highlight Reserved Instance or Savings Plan opportunities when applicable
+
+    Key principles:
+    - Lead with the projected monthly savings number as the headline
+    - Always base cost calculations on the real AWS pricing data provided
+    - Prioritize recommendations by savings impact (highest first)
+    - For each recommendation include: priority level, confidence level, projected savings, and implementation steps
+    - Flag anti-patterns that increase cost risk (BestEffort QoS, missing limits, :latest tags)
+    - NEVER recommend automatically applying changes; always recommend human review first
+    - For MEDIUM/LOW confidence recommendations, explicitly suggest extending the monitoring window
+    - Use clear section headers and bullet points for readability
+    - Include a "Quick Wins" section for HIGH confidence changes that are low-risk and high-impact
+    - End with concrete next steps the team can take this week
+  outputExtraction:
+    type: text
+---
+# AWS credentials for the Pricing API (pricing:* permissions required, free API)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: ottoflow
+type: Opaque
+stringData:
+  access-key-id: "REPLACE_WITH_AWS_ACCESS_KEY_ID"
+  secret-access-key: "REPLACE_WITH_AWS_SECRET_ACCESS_KEY"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: aws-pricing-mcp
+  namespace: ottoflow
+spec:
+  transport:
+    type: stdio
+    command:
+      # Resolved from the controller PATH. Patch to an absolute path or use a
+      # container entrypoint if uvx is not on PATH in your environment.
+      - "uvx"
+      - "awslabs.aws-pricing-mcp-server@latest"
+  timeout: "60s"
+  auth:
+    type: none
+  env:
+    - name: FASTMCP_LOG_LEVEL
+      value: "ERROR"
+    - name: AWS_REGION
+      value: "us-east-1"
+    - name: AWS_PROFILE
+      value: "default"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: cost-optimization-eks-prometheus-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: cost-optimization-eks-prometheus
+  inputValues:
+    awsRegion: "us-west-2"
+    overProvisionThreshold: "0.3"
+    prometheusLookbackDays: "7"

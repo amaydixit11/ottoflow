@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-apikey-secret
+  namespace: ottoflow
+type: Opaque
+stringData:
+  apiKey: "replace-me"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-basic-secret
+  namespace: ottoflow
+type: Opaque
+# Basic auth requires the Secret to contain BOTH keys "username" and "password"
+# (internal/agent/mcp_client_impl.go:251-270). spec.auth.secretRef.key below is
+# CRD-required but unused on the basic auth path (api/v1alpha1/mcpserver_types.go:145-146).
+stringData:
+  username: "mcp-user"
+  password: "replace-me"
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: sse-apikey-mcp
+  namespace: ottoflow
+spec:
+  transport:
+    # type: sse sets UseStreaming on the kubectl-ai client config
+    # (internal/agent/mcp_client_impl.go:170-175).
+    type: sse
+    address: "https://mcp.example.com/sse" # required for http/sse transports
+    headers:
+      Accept: "text/event-stream"
+  timeout: "60s"
+  auth:
+    # type: apiKey maps to kubectl-ai's "api-key" auth type
+    # (internal/agent/mcp_client_impl.go:224-225).
+    type: apiKey
+    secretRef:
+      name: mcp-apikey-secret
+      namespace: ottoflow
+      key: apiKey
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: http-basic-mcp
+  namespace: ottoflow
+spec:
+  transport:
+    type: http
+    address: "https://mcp.example.com/mcp"
+  timeout: "60s"
+  auth:
+    type: basic
+    secretRef:
+      name: mcp-basic-secret
+      namespace: ottoflow
+      key: password

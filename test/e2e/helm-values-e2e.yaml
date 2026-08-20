@@ -1,0 +1,7 @@
+# Values merged into charts/ottoflow for kind e2e installs.
+# Lists replace chart defaults — keep --leader-elect when overriding controller.args.
+controller:
+  args:
+    - --leader-elect
+    # Copy agent-executor TLS CA from install ns when WorkflowRun is in another namespace (e.g. default).
+    - --secret-source-namespace=ottoflow

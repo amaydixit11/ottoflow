@@ -1,0 +1,18 @@
+{{- if and .Values.agentExecutor.enabled .Values.rbac.create }}
+# Binds controller SA to agent-executor-caller role so the controller (and runner Jobs in the same namespace) can call the agent executor.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-agent-executor-caller-controller
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: agent-executor-caller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ottoflow.fullname" . }}-agent-executor-caller
+subjects:
+  - kind: ServiceAccount
+    name: {{ if .Values.controller.serviceAccount.name }}{{ .Values.controller.serviceAccount.name }}{{ else }}controller-manager{{ end }}
+    namespace: {{ include "ottoflow.namespace" . }}
+{{- end }}

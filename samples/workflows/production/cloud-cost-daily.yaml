@@ -1,0 +1,389 @@
+# Cloud Cost Daily Report — EKS cluster + applications optimization
+#
+# Runs daily (cron), collects per-namespace cost data, fetches AWS pricing,
+# generates an executive report, and posts a summary to Slack.
+#
+# Prerequisites: Prometheus (cAdvisor), AWS IAM (pricing:*); StepTemplate
+# cost-namespace-collector (apply samples/steptemplates/cost-namespace-collector.yaml);
+# Agent cloud-cost-analyst; MCPServer aws-pricing-mcp.
+#
+# Deploy to an EKS cluster: apply this directory, create Secret for AWS + set
+# slackWebhookUrl (WorkflowRun inputValues or Secret). See README.md.
+#
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: cloud-cost-daily
+  namespace: default
+  labels:
+    app: cloud-cost
+  annotations:
+    description: >-
+      Daily cost optimization report for EKS: cloud resources, cluster utilization,
+      and application right-sizing. Publishes summary to Slack.
+spec:
+  inputs:
+    - name: clusterName
+      description: "Cluster name for report and Slack (e.g. my-cluster)"
+      default: "my-cluster"
+    - name: namespace
+      description: "Target namespace (leave empty for all non-system namespaces)"
+    - name: awsRegion
+      description: "AWS region for pricing lookups"
+      default: "us-east-1"
+    - name: cpuCostPerCore
+      description: "Fallback monthly cost per vCPU if AWS pricing unavailable"
+      default: "31.0"
+    - name: memoryCostPerGB
+      description: "Fallback monthly cost per GB RAM if AWS pricing unavailable"
+      default: "3.5"
+    - name: overProvisionThreshold
+      description: "P99 utilization ratio below which a pod is over-provisioned (0.0-1.0)"
+      default: "0.3"
+    - name: prometheusLookbackDays
+      description: "Days of Prometheus history for P95/P99"
+      default: "7"
+    - name: slackWebhookUrl
+      description: "Slack webhook URL (leave empty to skip notification)"
+
+  variables:
+    - name: threshold
+      expression: 'double(inputs.overProvisionThreshold)'
+    - name: lookbackRange
+      expression: 'inputs.prometheusLookbackDays + "d"'
+
+  # Optional: inject Nirmata LLM credentials into every run (including cron). Secret must exist in this workflow's namespace.
+  # execution:
+  #   job:
+  #     env:
+  #       - name: NIRMATA_LLM_TOKEN
+  #         valueFrom:
+  #           secretKeyRef:
+  #             name: nirmata-llm-credentials
+  #             key: NIRMATA_LLM_TOKEN
+
+  triggers:
+    - cron:
+        schedule: "0 6 * * *"
+        timezone: "America/Los_Angeles"
+        concurrencyPolicy: "Forbid"
+        # Optional: inject input values from Secrets when the scheduler creates a WorkflowRun (e.g. Slack webhook).
+        # inputValuesFrom:
+        #   - inputName: slackWebhookUrl
+        #     secretRef:
+        #       name: cloud-cost-slack
+        #       key: webhook-url
+
+  steps:
+    - name: listNamespaces
+      message: "Determine which namespaces to analyze"
+      resourceQuery:
+        apiVersion: v1
+        resource: Namespace
+        outputs:
+          namespaces: >-
+            has(inputs.namespace) && inputs.namespace != ""
+              ? [inputs.namespace]
+              : items.map(ns, ns.metadata.name).filter(ns, !ns.startsWith("kube-"))
+
+    # Requires ConfigMap cloud-cost-optimization-state to exist (kubectl apply -f cloud-cost-optimization-state.yaml).
+    - name: loadHistory
+      message: "Load previous run state for trend analysis"
+      failurePolicy: Continue
+      resourceQuery:
+        apiVersion: v1
+        resource: ConfigMap
+        namespace: '"default"'
+        name: '"cloud-cost-optimization-state"'
+        outputs:
+          hasPreviousRun: >-
+            object.?data.lastRunTime.orValue("") != ""
+          previousRunTime: >-
+            object.?data.lastRunTime.orValue("")
+          previousNamespaceCount: >-
+            object.?data.namespacesAnalyzed.orValue("0")
+          previousOverProvisioned: >-
+            object.?data.totalOverProvisioned.orValue("0")
+          previousPodsAnalyzed: >-
+            object.?data.totalPodsAnalyzed.orValue("0")
+          previousReportExcerpt: >-
+            object.?data.reportExcerpt.orValue("")
+
+    - name: collectPerNamespace
+      message: "Fan out per-namespace data collection"
+      dependsOn:
+        - listNamespaces
+      forEach:
+        items: 'variables.namespaces'
+        itemVariable: "ns"
+        maxConcurrency: 5
+        itemFailurePolicy: Continue
+        stepTemplateRef:
+          name: cost-namespace-collector
+          namespace: ottoflow
+          arguments:
+            namespace: 'variables.ns'
+            overProvisionThreshold: 'inputs.overProvisionThreshold'
+            prometheusLookbackDays: 'inputs.prometheusLookbackDays'
+      outputs:
+        - name: namespaceResults
+          expression: 'steps.collectPerNamespace.succeeded'
+        - name: namespacesAnalyzed
+          expression: 'size(steps.collectPerNamespace.succeeded)'
+        - name: namespaceFailed
+          expression: 'size(steps.collectPerNamespace.failed)'
+
+    - name: extractNodeInfo
+      message: "Extract node capacity and instance types"
+      dependsOn:
+        - listNamespaces
+      expressions:
+        - name: nodes
+          expression: 'dyn(resource.List("v1", "Node", "", {})).items'
+        - name: instanceTypes
+          expression: >-
+            expressions.nodes
+              .filter(n, has(n.metadata.labels) && "node.kubernetes.io/instance-type" in n.metadata.labels)
+              .map(n, n.metadata.labels["node.kubernetes.io/instance-type"])
+              .distinct()
+        - name: nodeRegions
+          expression: >-
+            expressions.nodes
+              .filter(n, has(n.metadata.labels) && "topology.kubernetes.io/region" in n.metadata.labels)
+              .map(n, n.metadata.labels["topology.kubernetes.io/region"])
+              .distinct()
+        - name: totalNodeCPU
+          expression: 'expressions.nodes.map(n, nodeCapacityCPU(n)).sum()'
+        - name: totalNodeMemBytes
+          expression: 'expressions.nodes.map(n, nodeCapacityMemory(n)).sum()'
+        - name: allocatableCPU
+          expression: 'expressions.nodes.map(n, nodeAllocatableCPU(n)).sum()'
+        - name: allocatableMemBytes
+          expression: 'expressions.nodes.map(n, nodeAllocatableMemory(n)).sum()'
+        - name: allPods
+          expression: 'dyn(resource.List("v1", "Pod", "", {})).items'
+        - name: clusterCPURequests
+          expression: 'expressions.allPods.map(p, podTotalCPURequest(p)).sum()'
+        - name: clusterMemRequests
+          expression: 'expressions.allPods.map(p, podTotalMemRequest(p)).sum()'
+      outputs:
+        - name: instanceTypes
+          expression: 'expressions.instanceTypes'
+        - name: nodeRegion
+          expression: 'size(expressions.nodeRegions) > 0 ? expressions.nodeRegions[0] : inputs.awsRegion'
+        - name: clusterUtilization
+          value:
+            totalNodes: size(expressions.nodes)
+            totalPods: size(expressions.allPods)
+            capacityCPU: format("%.2f cores", expressions.totalNodeCPU)
+            capacityMemory: format("%.2f GB", expressions.totalNodeMemBytes / 1073741824.0)
+            allocatableCPU: format("%.2f cores", expressions.allocatableCPU)
+            allocatableMemory: format("%.2f GB", expressions.allocatableMemBytes / 1073741824.0)
+            cpuRequestsTotal: format("%.2f cores", expressions.clusterCPURequests)
+            memoryRequestsTotal: format("%.2f GB", expressions.clusterMemRequests / 1073741824.0)
+            cpuUtilizationPct: >-
+              expressions.allocatableCPU > 0.0
+                ? format("%.1f%%", (expressions.clusterCPURequests / expressions.allocatableCPU) * 100.0)
+                : "N/A"
+            memoryUtilizationPct: >-
+              expressions.allocatableMemBytes > 0.0
+                ? format("%.1f%%", (expressions.clusterMemRequests / expressions.allocatableMemBytes) * 100.0)
+                : "N/A"
+
+    - name: fetchEC2Pricing
+      message: "Fetch on-demand EC2 pricing from AWS"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEC2"'
+          region: 'variables.nodeRegion'
+          filters: >-
+            [{"Field": "tenancy", "Value": "Shared", "Type": "TERM_MATCH"},
+             {"Field": "operatingSystem", "Value": "Linux", "Type": "TERM_MATCH"},
+             {"Field": "preInstalledSw", "Value": "NA", "Type": "TERM_MATCH"},
+             {"Field": "capacitystatus", "Value": "Used", "Type": "TERM_MATCH"}]
+          output_options: '{"pricing_terms": ["OnDemand"], "product_attributes": ["instanceType", "vcpu", "memory", "location"]}'
+      outputs:
+        - name: ec2PricingData
+          expression: 'toolResult'
+
+    - name: fetchEKSPricing
+      message: "Fetch EKS pricing from AWS"
+      dependsOn:
+        - extractNodeInfo
+      mcpToolCall:
+        server: aws-pricing-mcp
+        tool: get_pricing
+        arguments:
+          service_code: '"AmazonEKS"'
+          region: 'variables.nodeRegion'
+      outputs:
+        - name: eksPricingData
+          expression: 'toolResult'
+
+    - name: aggregateResults
+      message: "Compute aggregate totals"
+      dependsOn:
+        - collectPerNamespace
+      expressions:
+        - name: totalPodsAnalyzed
+          expression: >-
+            variables.namespaceResults.map(r, int(r.?outputs.podsAnalyzed.orValue(0))).sum()
+        - name: totalOverProvisioned
+          expression: >-
+            variables.namespaceResults.map(r, int(r.?outputs.overProvisionedCount.orValue(0))).sum()
+      outputs:
+        - name: totalPodsAnalyzed
+          expression: 'expressions.totalPodsAnalyzed'
+        - name: totalOverProvisioned
+          expression: 'expressions.totalOverProvisioned'
+
+    - name: generateReport
+      message: "LLM agent produces executive cost optimization report"
+      dependsOn:
+        - aggregateResults
+        - loadHistory
+        - fetchEC2Pricing
+        - fetchEKSPricing
+        - extractNodeInfo
+        - collectPerNamespace
+      agentRef:
+        name: cloud-cost-analyst
+        additionalPrompts:
+          - >-
+            variables.?hasPreviousRun.orValue(false) == true
+              ? format(
+                  "## TREND CONTEXT\n" +
+                  "Previous run: %s | Namespaces: %s | Pods: %s | Over-provisioned: %s\n" +
+                  "Previous excerpt:\n%s\n\nCompare current vs previous; highlight changes.\n\n",
+                  variables.?previousRunTime.orValue("unknown"),
+                  variables.?previousNamespaceCount.orValue("0"),
+                  variables.?previousPodsAnalyzed.orValue("0"),
+                  variables.?previousOverProvisioned.orValue("0"),
+                  variables.?previousReportExcerpt.orValue("(none)")
+                )
+              : "First run. No trend data. Establish baseline and focus on immediate opportunities.\n\n"
+          - >-
+            format(
+              "## CLUSTER: %s\n" +
+              "Namespaces: %d (failed: %d) | Pods analyzed: %d | Over-provisioned: %d\n" +
+              "Lookback: %s days | Threshold: P99 < %s\n\n## CLUSTER UTILIZATION\n%v\n\n",
+              inputs.clusterName,
+              int(variables.namespacesAnalyzed),
+              int(variables.namespaceFailed),
+              int(variables.totalPodsAnalyzed),
+              int(variables.totalOverProvisioned),
+              inputs.prometheusLookbackDays,
+              inputs.overProvisionThreshold,
+              variables.clusterUtilization
+            )
+          - >-
+            format(
+              "## PER-NAMESPACE RESULTS\n%v",
+              variables.namespaceResults
+            )
+          - >-
+            format(
+              "## AWS PRICING\nRegion: %s | Instance types: %v\nEC2:\n%v\nEKS:\n%v\n" +
+              "Fallback: $%s/core, $%s/GB per month.\n\n",
+              variables.nodeRegion,
+              variables.instanceTypes,
+              variables.ec2PricingData,
+              variables.eksPricingData,
+              inputs.cpuCostPerCore,
+              inputs.memoryCostPerGB
+            )
+          - >-
+            "Sections: 1) Executive Summary (headline savings) 2) Top namespaces by savings (table) " +
+            "3) Trend analysis 4) Right-sizing (per-pod, confidence, $) 5) Waste cleanup " +
+            "6) Anti-patterns 7) Cluster utilization 8) Next steps. Never recommend auto-apply."
+      outputs:
+        - name: report
+          expression: 'agentResponse'
+
+    - name: persistState
+      message: "Save run state for next trend comparison"
+      dependsOn:
+        - generateReport
+        - aggregateResults
+        - collectPerNamespace
+      failurePolicy: Continue
+      mutate:
+        target:
+          apiVersion: "v1"
+          resource: "ConfigMap"
+          namespace: '"default"'
+          name: '"cloud-cost-optimization-state"'
+        patchType: ApplyConfiguration
+        applyConfiguration:
+          expression: >-
+            {
+              "data": {
+                "lastRunTime": string(time.now()),
+                "namespacesAnalyzed": string(variables.namespacesAnalyzed),
+                "totalPodsAnalyzed": string(variables.totalPodsAnalyzed),
+                "totalOverProvisioned": string(variables.totalOverProvisioned),
+                "reportExcerpt": size(string(variables.report)) > 3000
+                  ? string(variables.report).substring(0, 3000)
+                  : string(variables.report)
+              }
+            }
+
+    - name: notifySlack
+      message: "Send daily summary to Slack"
+      dependsOn:
+        - generateReport
+        - aggregateResults
+        - collectPerNamespace
+      matchConditions:
+        - name: slackConfigured
+          expression: 'has(inputs.slackWebhookUrl) && inputs.slackWebhookUrl != ""'
+      expressions:
+        - name: trendNote
+          expression: >-
+            variables.?hasPreviousRun.orValue(false) == true
+              ? format(" | Previous over-provisioned: %s", variables.?previousOverProvisioned.orValue("?"))
+              : " | First run (baseline)"
+        - name: slackHeader
+          expression: >-
+            format(
+              "*Cloud Cost Daily — %s* | Namespaces: %d | Pods: %d | Over-provisioned: %d%s | P95/P99 over %s days + AWS pricing.",
+              inputs.clusterName,
+              int(variables.namespacesAnalyzed),
+              int(variables.totalPodsAnalyzed),
+              int(variables.totalOverProvisioned),
+              expressions.trendNote,
+              inputs.prometheusLookbackDays
+            )
+        # Include first ~2800 chars of the report so Slack shows executive summary and key findings (Slack message limit ~40k).
+        - name: reportStr
+          expression: 'string(variables.report)'
+        - name: reportExcerpt
+          expression: >-
+            size(expressions.reportStr) > 2800
+              ? expressions.reportStr.substring(0, 2800) + "\n\n..."
+              : expressions.reportStr
+        - name: slackText
+          expression: "expressions.slackHeader + \"\\n\\n---\\n\\n\" + expressions.reportExcerpt + \"\\n\\n_Full report in run artifacts._\""
+        - name: slackResult
+          expression: >-
+            http.Post(inputs.slackWebhookUrl, {"text": expressions.slackText}, {"Content-Type": "application/json"})
+      outputs:
+        # http.Post returns non-2xx as data, not an error — check status explicitly.
+        - name: slackNotified
+          expression: 'expressions.slackResult.statusCode >= 200 && expressions.slackResult.statusCode < 300'
+
+  outputs:
+    - name: report
+      expression: 'variables.report'
+    - name: namespacesAnalyzed
+      expression: 'variables.namespacesAnalyzed'
+    - name: totalPodsAnalyzed
+      expression: 'variables.totalPodsAnalyzed'
+    - name: totalOverProvisioned
+      expression: 'variables.totalOverProvisioned'
+    - name: clusterUtilization
+      expression: 'variables.clusterUtilization'

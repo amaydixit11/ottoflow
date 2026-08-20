@@ -1,0 +1,80 @@
+# LIMITATION (current main): the callback response body is NOT exposed to CEL.
+#   - executor.go:560 discards executeStep's return value.
+#   - wait_for_callback.go's resume path returns the parsed callback outputs
+#     without calling WriteStepOutputs, so approved/reviewer/comments never
+#     land in `variables`.
+#   - callbackToken IS written flat (wait_for_callback.go:140) but only inside the
+#     FIRST runner process; the ErrAwaitingCallback path (executor.go:565-578) returns
+#     without saveCheckpoint, so it is absent from the resumed Job's context.
+# Therefore downstream steps must NOT branch on the approval decision yet. They
+# depend on awaitApproval only for ordering.
+#
+# Also note: the resumed Job is a fresh process, and checkpointing is opt-in
+# (WorkflowRun.spec.execution.checkpointing.enabled — see CheckpointingEnabled()).
+# Without it, NO pre-pause step output survives the pause. Expressions evaluated
+# after awaitApproval must therefore use only `inputs.*` and outputs produced by
+# post-resume steps — hence the workflow output below does not read
+# variables.summary from collectFindings.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: approval-workflow
+  namespace: default
+spec:
+  inputs:
+    - name: remediationTarget
+      description: "Namespace or resource to remediate"
+      required: true
+    - name: severity
+      description: "Severity of the finding"
+      default: "Medium"
+
+  steps:
+    # Step 1: Collect findings and summarize
+    - name: collectFindings
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: inputs.remediationTarget
+        outputs:
+          summary: '"Found " + string(size(items)) + " pods in namespace " + inputs.remediationTarget'
+
+    # Step 2: Pause and wait for human approval
+    - name: awaitApproval
+      dependsOn: [collectFindings]
+      waitForCallback:
+        timeout: "24h"
+        callbackRef: human-approval
+        message: |
+          Remediation is ready to apply.
+          Review the pod findings collected for this namespace, then POST your
+          decision (approved/reviewer/comments) to the callback URL.
+          The callback token is NOT resolvable from CEL. Look it up in the
+          WorkflowRun's status.pendingCallback field, or in the runner pod's logs.
+        outputSchema:
+          type: object
+          properties:
+            approved:
+              type: boolean
+            reviewer:
+              type: string
+            comments:
+              type: string
+          required: ["approved"]
+        failurePolicy: Fail   # workflow fails if no response within 24h
+
+    # Step 3: Runs once the callback resolves, regardless of approve/reject.
+    # The approval decision itself is not resolvable in CEL (see LIMITATION
+    # note above), so this step cannot branch on it — it exists purely to
+    # run something ordered after awaitApproval.
+    - name: postApproval
+      dependsOn: [awaitApproval]
+      outputs:
+        - name: postApprovalResult
+          expression: '"Callback resolved for remediation target " + inputs.remediationTarget'
+
+  outputs:
+    # Reads only a post-resume step output — see the note at the top of this file
+    # for why pre-pause outputs (e.g. variables.summary) are not safe here.
+    - name: outcome
+      expression: 'variables.postApprovalResult'

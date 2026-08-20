@@ -1,0 +1,119 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: cluster-overview
+  namespace: ottoflow
+spec:
+  steps:
+    - name: getResources
+      message: "Collect cluster resources"
+      expressions:
+        - name: namespaces
+          expression: 'dyn(resource.List("v1", "namespaces", "", {})).items'
+        - name: namespaceNames
+          expression: 'expressions.namespaces.map(ns, ns.metadata.name)'
+        - name: pods
+          expression: >-
+            expressions.namespaceNames.map(nsName, dyn(resource.List("v1", "Pod", nsName, {})).items).flatten()
+        - name: deployments
+          expression: >-
+            expressions.namespaceNames.map(nsName, dyn(resource.List("apps/v1", "Deployment", nsName, {})).items).flatten()
+        - name: services
+          expression: >-
+            expressions.namespaceNames.map(nsName, dyn(resource.List("v1", "Service", nsName, {})).items).flatten()
+      outputs:
+        - name: pods
+          expression: 'expressions.pods'
+        - name: namespaces
+          expression: 'expressions.namespaces'
+        - name: deployments
+          expression: 'expressions.deployments'
+        - name: services
+          expression: 'expressions.services'
+    
+    - name: analyzeCluster
+      message: "Analyze cluster state and namespace breakdown"
+      dependsOn:
+        - getResources
+      expressions:
+        - name: runningPods
+          expression: 'size(variables.pods.filter(p, p.status.phase == "Running"))'
+        - name: pendingPods
+          expression: 'size(variables.pods.filter(p, p.status.phase == "Pending"))'
+        - name: failedPods
+          expression: 'size(variables.pods.filter(p, p.status.phase == "Failed"))'
+        - name: succeededPods
+          expression: 'size(variables.pods.filter(p, p.status.phase == "Succeeded"))'
+        - name: namespaceNames
+          expression: 'variables.namespaces.map(ns, ns.metadata.name)'
+        - name: podsWithResources
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers))
+        - name: totalCPURequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.cpu) ? 
+                string(c.resources.requests.cpu) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalMemoryRequests
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.requests) && has(c.resources.requests.memory) ? 
+                string(c.resources.requests.memory) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalCPULimits
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.limits) && has(c.resources.limits.cpu) ? 
+                string(c.resources.limits.cpu) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+        - name: totalMemoryLimits
+          expression: >-
+            variables.pods.filter(p, has(p.spec.containers)).map(p, 
+              p.spec.containers.map(c, 
+                has(c.resources) && has(c.resources.limits) && has(c.resources.limits.memory) ? 
+                string(c.resources.limits.memory) : "0"
+              )
+            ).flatten().filter(q, q != "0").map(q, quantity(q).asApproximateFloat()).sum()
+      outputs:
+        - name: report
+          value:
+            summary:
+              totalNamespaces: size(variables.namespaces)
+              totalPods: size(variables.pods)
+              totalDeployments: size(variables.deployments)
+              totalServices: size(variables.services)
+            podsByPhase:
+              Running: expressions.runningPods
+              Pending: expressions.pendingPods
+              Failed: expressions.failedPods
+              Succeeded: expressions.succeededPods
+            namespaces: >-
+              expressions.namespaceNames.map(nsName, format("%s: %d pods, %d deployments, %d services",
+                nsName,
+                size(variables.pods.filter(p, p.metadata.namespace == nsName)),
+                size(variables.deployments.filter(d, d.metadata.namespace == nsName)),
+                size(variables.services.filter(s, s.metadata.namespace == nsName))
+              ))
+            userNamespaces: >-
+              expressions.namespaceNames.filter(nsName, nsName != "kube-system" && nsName != "kube-public" && nsName != "kube-node-lease")
+            namespaceCount: size(expressions.namespaceNames)
+            resourceUsage:
+              cpuRequests: format("%.2f cores", expressions.totalCPURequests)
+              cpuLimits: format("%.2f cores", expressions.totalCPULimits)
+              memoryRequests: format("%.2f GB", expressions.totalMemoryRequests / 1073741824.0)
+              memoryLimits: format("%.2f GB", expressions.totalMemoryLimits / 1073741824.0)
+              podsWithResourceRequests: size(expressions.podsWithResources.filter(p, p.spec.containers.exists(c, has(c.resources) && has(c.resources.requests))))
+              podsWithResourceLimits: size(expressions.podsWithResources.filter(p, p.spec.containers.exists(c, has(c.resources) && has(c.resources.limits))))
+            clusterHealth: >-
+              expressions.failedPods == 0 && expressions.pendingPods == 0 ? "Healthy" : "Issues Detected"
+  
+  outputs:
+    - name: report
+      expression: 'variables.report'

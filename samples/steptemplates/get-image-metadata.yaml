@@ -1,0 +1,35 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: get-image-metadata
+  namespace: ottoflow
+spec:
+  description: "Get image metadata (created, architecture, os) using image.GetMetadata. Use in forEach over image list."
+  parameters:
+    - name: image
+      description: "Container image reference (e.g. nginx:1.21)"
+      required: true
+  step:
+    message: "Get metadata for image {{.image}}"
+    expressions:
+      - name: metadata
+        expression: 'image.GetMetadata("{{.image}}")'
+      - name: created
+        expression: 'has(expressions.metadata.config.created) ? expressions.metadata.config.created : null'
+      - name: architecture
+        expression: 'has(expressions.metadata.config.architecture) ? expressions.metadata.config.architecture : null'
+      - name: os
+        expression: 'has(expressions.metadata.config.os) ? expressions.metadata.config.os : null'
+      - name: hasCreated
+        expression: 'expressions.created != null'
+      - name: imageTimestamp
+        expression: 'expressions.hasCreated ? timestamp(expressions.created) : null'
+    outputs:
+      - name: imageCreated
+        expression: 'expressions.created'
+      - name: imageTimestamp
+        expression: 'expressions.imageTimestamp'
+      - name: architecture
+        expression: 'expressions.architecture'
+      - name: os
+        expression: 'expressions.os'

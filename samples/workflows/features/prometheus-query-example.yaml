@@ -1,0 +1,42 @@
+# Prometheus query step example: list pods (resourceQuery) then query Prometheus (prometheusQuery).
+# Requires --prometheus-url (or PROMETHEUS_URL) for the second step to succeed.
+# Example: ./bin/ottoflow run prometheus-query-example --workflow-dir samples/workflows \
+#            --input namespace=default --input timeRange=5m --prometheus-url http://localhost:9090
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: prometheus-query-example
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to list pods and scope Prometheus query"
+      default: "default"
+  steps:
+    - name: listPods
+      message: "List pods in namespace (resourceQuery)"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: 'inputs.namespace'
+        outputs:
+          count: size(items)
+          names: items.map(i, i.metadata.name)
+
+    - name: queryCpuUsage
+      message: "Query Prometheus for container CPU usage (prometheusQuery)"
+      dependsOn:
+        - listPods
+      prometheusQuery:
+        query: 'sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{namespace="{{.namespace}}"}[5m]))'
+        timeRange: "5m"
+        variables:
+          namespace: 'inputs.namespace'
+        outputs:
+          sampleCount: 'size(result.samples)'
+          samples: 'result.samples'
+  outputs:
+    - name: podCount
+      expression: 'variables.count'
+    - name: prometheusSampleCount
+      expression: 'variables.sampleCount'

@@ -1,0 +1,232 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: kubernetes-cel-libraries-example-37
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: ipAddress
+      description: IP address to validate
+      default: "192.168.1.1"
+    - name: cidrBlock
+      description: CIDR block to check
+      default: "192.168.0.0/16"
+    - name: urlString
+      description: URL to parse
+      default: "https://example.com:8080/path?query=value"
+    - name: quantityString
+      description: Kubernetes quantity string
+      default: "512Mi"
+    - name: versionString
+      description: Semantic version string
+      default: "1.2.3"
+    - name: dnsName
+      description: DNS name to validate
+      default: "my-app"
+    - name: numberList
+      description: List of numbers
+      default: '[10, 5, 20, 15]'
+    - name: textWithNumbers
+      description: Text containing numbers
+      default: "Version 1.2.3 released on 2024-01-15"
+
+  steps:
+    # List Library Example
+    - name: listOperations
+      expressions:
+        - name: numbers
+          expression: 'inputs.numberList'
+        - name: minValue
+          expression: 'json.unmarshal(inputs.numberList).min()'
+        - name: maxValue
+          expression: 'json.unmarshal(inputs.numberList).max()'
+        - name: sumValue
+          expression: 'json.unmarshal(inputs.numberList).sum()'
+        - name: isSorted
+          expression: 'json.unmarshal(inputs.numberList).isSorted()'
+        - name: indexOfTen
+          expression: 'json.unmarshal(inputs.numberList).indexOf(10)'
+      outputs:
+        - name: minValue
+          expression: 'expressions.minValue'
+        - name: maxValue
+          expression: 'expressions.maxValue'
+        - name: sumValue
+          expression: 'expressions.sumValue'
+        - name: isSorted
+          expression: 'expressions.isSorted'
+        - name: indexOfTen
+          expression: 'expressions.indexOfTen'
+
+    # Regex Library Example
+    - name: regexOperations
+      expressions:
+        - name: firstNumber
+          expression: 'inputs.textWithNumbers.find("[0-9]+\\.[0-9]+")'
+        - name: allNumbers
+          expression: 'inputs.textWithNumbers.findAll("[0-9]+")'
+        - name: numbersSum
+          expression: 'inputs.textWithNumbers.findAll("[0-9]+").map(n, int(n)).sum()'
+      outputs:
+        - name: firstNumber
+          expression: 'expressions.firstNumber'
+        - name: allNumbers
+          expression: 'expressions.allNumbers'
+        - name: numbersSum
+          expression: 'expressions.numbersSum'
+
+    # URL Library Example
+    - name: urlOperations
+      expressions:
+        - name: isValidUrl
+          expression: 'isURL(inputs.urlString)'
+        - name: urlObj
+          expression: 'url(inputs.urlString)'
+        - name: scheme
+          expression: 'url(inputs.urlString).getScheme()'
+        - name: host
+          expression: 'url(inputs.urlString).getHost()'
+        - name: hostname
+          expression: 'url(inputs.urlString).getHostname()'
+        - name: port
+          expression: 'url(inputs.urlString).getPort()'
+        - name: path
+          expression: 'url(inputs.urlString).getEscapedPath()'
+        - name: query
+          expression: 'url(inputs.urlString).getQuery()'
+      outputs:
+        - name: isValidUrl
+          expression: 'expressions.isValidUrl'
+        - name: scheme
+          expression: 'expressions.scheme'
+        - name: hostname
+          expression: 'expressions.hostname'
+        - name: port
+          expression: 'expressions.port'
+
+    # IP Address Library Example
+    - name: ipOperations
+      expressions:
+        - name: isValidIp
+          expression: 'isIP(inputs.ipAddress)'
+        - name: ipObj
+          expression: 'ip(inputs.ipAddress)'
+        - name: ipFamily
+          expression: 'ip(inputs.ipAddress).family()'
+        - name: isLoopback
+          expression: 'ip(inputs.ipAddress).isLoopback()'
+        - name: isGlobalUnicast
+          expression: 'ip(inputs.ipAddress).isGlobalUnicast()'
+        - name: isCanonical
+          expression: 'ip.isCanonical(inputs.ipAddress)'
+      outputs:
+        - name: isValidIp
+          expression: 'expressions.isValidIp'
+        - name: ipFamily
+          expression: 'expressions.ipFamily'
+        - name: isLoopback
+          expression: 'expressions.isLoopback'
+        - name: isGlobalUnicast
+          expression: 'expressions.isGlobalUnicast'
+
+    # CIDR Library Example
+    - name: cidrOperations
+      expressions:
+        - name: isValidCidr
+          expression: 'isCIDR(inputs.cidrBlock)'
+        - name: cidrObj
+          expression: 'cidr(inputs.cidrBlock)'
+        - name: containsIp
+          expression: 'cidr(inputs.cidrBlock).containsIP(ip(inputs.ipAddress))'
+        - name: prefixLength
+          expression: 'cidr(inputs.cidrBlock).prefixLength()'
+        - name: maskedCidr
+          expression: 'cidr(inputs.cidrBlock).masked()'
+      outputs:
+        - name: isValidCidr
+          expression: 'expressions.isValidCidr'
+        - name: containsIp
+          expression: 'expressions.containsIp'
+        - name: prefixLength
+          expression: 'expressions.prefixLength'
+        - name: maskedCidr
+          expression: 'expressions.maskedCidr'
+
+    # Format Library Example
+    - name: formatValidation
+      expressions:
+        - name: isValidDnsLabel
+          expression: '!format.dns1123Label().validate(inputs.dnsName).hasValue()'
+        - name: validationErrors
+          expression: 'format.dns1123Label().validate(inputs.dnsName).orValue([])'
+        - name: isValidUuid
+          expression: '!format.uuid().validate("550e8400-e29b-41d4-a716-446655440000").hasValue()'
+      outputs:
+        - name: isValidDnsLabel
+          expression: 'expressions.isValidDnsLabel'
+        - name: validationErrors
+          expression: 'expressions.validationErrors'
+
+    # Quantity Library Example
+    - name: quantityOperations
+      expressions:
+        - name: isValidQuantity
+          expression: 'isQuantity(inputs.quantityString)'
+        - name: quantityObj
+          expression: 'quantity(inputs.quantityString)'
+        - name: isInteger
+          expression: 'quantity(inputs.quantityString).isInteger()'
+        - name: asInteger
+          expression: 'quantity(inputs.quantityString).asInteger()'
+        - name: asFloat
+          expression: 'quantity(inputs.quantityString).asApproximateFloat()'
+        - name: sign
+          expression: 'quantity(inputs.quantityString).compareTo(quantity("0"))'
+        - name: doubled
+          expression: 'quantity(inputs.quantityString).add(quantity(inputs.quantityString))'
+        - name: comparison
+          expression: 'quantity(inputs.quantityString).compareTo(quantity("1Gi"))'
+      outputs:
+        - name: isValidQuantity
+          expression: 'expressions.isValidQuantity'
+        - name: isInteger
+          expression: 'expressions.isInteger'
+        - name: asInteger
+          expression: 'expressions.asInteger'
+        - name: asFloat
+          expression: 'expressions.asFloat'
+        - name: doubled
+          expression: 'expressions.doubled'
+        - name: comparison
+          expression: 'expressions.comparison'
+
+    # Semver Library Example
+    - name: semverOperations
+      expressions:
+        - name: isValidSemver
+          expression: 'isSemver(inputs.versionString)'
+        - name: semverObj
+          expression: 'semver(inputs.versionString)'
+        - name: major
+          expression: 'semver(inputs.versionString).major()'
+        - name: minor
+          expression: 'semver(inputs.versionString).minor()'
+        - name: patch
+          expression: 'semver(inputs.versionString).patch()'
+        - name: isLessThan
+          expression: 'semver(inputs.versionString).isLessThan(semver("2.0.0"))'
+        - name: comparison
+          expression: 'semver(inputs.versionString).compareTo(semver("1.0.0"))'
+      outputs:
+        - name: isValidSemver
+          expression: 'expressions.isValidSemver'
+        - name: major
+          expression: 'expressions.major'
+        - name: minor
+          expression: 'expressions.minor'
+        - name: patch
+          expression: 'expressions.patch'
+        - name: isLessThan
+          expression: 'expressions.isLessThan'
+        - name: comparison
+          expression: 'expressions.comparison'

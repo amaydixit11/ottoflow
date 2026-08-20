@@ -1,0 +1,65 @@
+# Trigger an OttoFlow workflow whenever an ArgoCD Application finishes syncing.
+#
+# How it works:
+#   - OttoFlow watches for UPDATE events on argoproj.io/v1alpha1 Application resources.
+#   - celFilter drops all events where sync hasn't completed yet, so the workflow only
+#     fires on actual sync completions — not on every label patch or health update.
+#   - inputMapping extracts the app name and destination namespace from the event object
+#     and passes them as workflow inputs.
+#   - Deduplication is automatic: OttoFlow detects status.sync.revision as the ArgoCD
+#     revision field and suppresses duplicate runs for the same git commit.
+#
+# Note on fieldSelector:
+#   You might expect to use fieldSelector: "status.sync.status=Synced" to filter at the
+#   Kubernetes watch level. This does NOT work for CRD status fields — the API server only
+#   indexes metadata.name and metadata.namespace for custom resources. Use celFilter instead.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: argocd-sync-policy-check
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: appName
+      description: ArgoCD Application name
+    - name: appNamespace
+      description: Target namespace the application deploys into
+
+  triggers:
+    - event:
+        resources:
+          - apiVersion: argoproj.io/v1alpha1
+            kind: Application
+            namespace: argocd   # watch Applications in the argocd namespace
+        operations:
+          - UPDATE
+        # Drop events where the sync hasn't completed. This is evaluated in-process
+        # because Kubernetes cannot filter on CRD status fields at the watch level.
+        celFilter: 'object.status.sync.status == "Synced"'
+        inputMapping:
+          appName: "object.metadata.name"
+          appNamespace: "object.spec.destination.namespace"
+        # DedupKey and DedupWindow are not needed here — OttoFlow auto-detects
+        # status.sync.revision as the ArgoCD revision field and deduplicates automatically.
+
+  steps:
+    - name: logSync
+      expressions:
+        - name: msg
+          expression: '"ArgoCD sync completed: app=" + inputs.appName + " namespace=" + inputs.appNamespace'
+      outputs:
+        - name: message
+          expression: 'expressions.msg'
+
+  # To add an LLM-based policy check, replace the step above with:
+  #   - name: runPolicyCheck
+  #     agentRef:
+  #       name: policy-agent
+  #     prompt: 'Check Kyverno policy compliance for app ' + inputs.appName + ' in namespace ' + inputs.appNamespace
+  #     outputs:
+  #       - name: policyResult
+  #         expression: agentResponse
+
+  outputs:
+    - name: syncMessage
+      expression: 'variables.message'

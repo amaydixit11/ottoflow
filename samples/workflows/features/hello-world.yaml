@@ -1,0 +1,23 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: hello-world
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: name
+      description: "Who to greet"
+      default: "World"
+  
+  steps:
+    - name: greet
+      expressions:
+        - name: greeting
+          expression: '"Hello, " + inputs.name + "!"'
+      outputs:
+        - name: message
+          expression: 'expressions.greeting'
+  
+  outputs:
+    - name: greeting
+      expression: 'variables.message'

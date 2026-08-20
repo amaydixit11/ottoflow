@@ -1,0 +1,50 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: foreach-example
+  namespace: ottoflow
+  annotations:
+    description: "Example workflow demonstrating forEach step with parallel execution"
+spec:
+  inputs:
+    - name: items
+      description: "List of items to process"
+      default: '["item1", "item2", "item3"]'
+  steps:
+    - name: processItems
+      message: "Process items in parallel"
+      forEach:
+        # Workflow inputs are strings, so a JSON list arrives as text and has to be parsed
+        # before forEach can iterate it.
+        items: 'json.unmarshal(inputs.items)'
+        itemVariable: "item"
+        step:
+          expressions:
+            - name: processed
+              expression: 'item + "-processed"'
+            - name: uppercase
+              expression: 'item.upperAscii()'
+          outputs:
+            - name: result
+              expression: 'expressions.processed'
+            - name: upper
+              expression: 'expressions.uppercase'
+        maxConcurrency: 3
+        itemFailurePolicy: Continue
+      outputs:
+        - name: totalProcessed
+          expression: 'size(steps.processItems.results)'
+        - name: successful
+          expression: 'size(steps.processItems.succeeded)'
+        - name: failed
+          expression: 'size(steps.processItems.failed)'
+        - name: results
+          expression: 'steps.processItems.results'
+  
+  outputs:
+    - name: summary
+      value:
+        totalProcessed: variables.totalProcessed
+        successful: variables.successful
+        failed: variables.failed
+        results: variables.results

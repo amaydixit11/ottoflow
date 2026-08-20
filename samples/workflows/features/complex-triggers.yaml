@@ -1,0 +1,48 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: multi-trigger-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: environment
+      description: "Environment name"
+      default: "dev"
+    # There is no CEL binding for "which trigger started this run". A trigger passes that
+    # information in explicitly via inputMapping (see the event trigger below); the default
+    # covers a manual run, where nothing sets it.
+    - name: triggerType
+      description: "How this run was started"
+      default: "Manual"
+  steps:
+    - name: processTrigger
+      message: "Process trigger event"
+      outputs:
+        - name: type
+          expression: 'inputs.triggerType'
+        - name: message
+          expression: '"Triggered by: " + inputs.triggerType'
+  outputs:
+    - name: trigger-info
+      expression: 'variables.message'
+  triggers:
+    # Cron trigger - runs every hour
+    - cron:
+        schedule: "0 * * * *"
+        concurrencyPolicy: "Allow"
+    # Event trigger - watches for ConfigMap changes
+    - event:
+        resources:
+          - apiVersion: v1
+            kind: ConfigMap
+            namespace: ottoflow
+        operations:
+          - CREATE
+          - UPDATE
+        labelSelector:
+          matchLabels:
+            managed-by: ottoflow
+        # Tell the workflow which trigger fired. Values are CEL, so a literal string
+        # needs quoting inside the expression.
+        inputMapping:
+          triggerType: '"ConfigMapEvent"'

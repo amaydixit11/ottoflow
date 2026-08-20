@@ -1,0 +1,57 @@
+# Trigger an OttoFlow workflow whenever a FluxCD Kustomization finishes reconciling.
+#
+# How it works:
+#   - OttoFlow watches for UPDATE events on kustomize.toolkit.fluxcd.io/v1 Kustomization resources.
+#   - celFilter fires only when the Kustomization has a Ready=True condition, meaning reconciliation
+#     completed successfully. This is checked in-process because Kubernetes cannot filter on CRD
+#     status.conditions at the watch level.
+#   - inputMapping extracts the kustomization name and source revision.
+#   - Deduplication is automatic: OttoFlow detects status.lastAppliedRevision as the FluxCD
+#     revision field and suppresses duplicate runs for the same git commit.
+#
+# For HelmRelease triggers, replace:
+#   kind: HelmRelease (apiVersion: helm.toolkit.fluxcd.io/v2)
+#   celFilter: 'object.status.conditions.exists(c, c.type == "Ready" && c.status == "True")'
+#   (OttoFlow auto-detects status.lastAttemptedRevision for HelmRelease dedup)
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: fluxcd-reconcile-compliance
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: kustomizationName
+      description: FluxCD Kustomization name
+    - name: appliedRevision
+      description: Git commit SHA that was applied
+
+  triggers:
+    - event:
+        resources:
+          - apiVersion: kustomize.toolkit.fluxcd.io/v1
+            kind: Kustomization
+            namespace: flux-system
+        operations:
+          - UPDATE
+        # Fire only when reconciliation succeeded (Ready condition is True).
+        celFilter: 'object.status.conditions.exists(c, c.type == "Ready" && c.status == "True")'
+        inputMapping:
+          kustomizationName: "object.metadata.name"
+          appliedRevision: "object.status.lastAppliedRevision"
+        # DedupWindow is a fallback for controllers whose revision field OttoFlow
+        # doesn't recognize. Not needed for FluxCD — status.lastAppliedRevision is
+        # auto-detected. Shown here for reference.
+        # dedupWindow: 30s
+
+  steps:
+    - name: logReconciliation
+      expressions:
+        - name: msg
+          expression: '"FluxCD reconciliation completed: kustomization=" + inputs.kustomizationName + " revision=" + inputs.appliedRevision'
+      outputs:
+        - name: message
+          expression: 'expressions.msg'
+
+  outputs:
+    - name: reconcileMessage
+      expression: 'variables.message'

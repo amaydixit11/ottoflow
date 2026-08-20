@@ -1,0 +1,54 @@
+---
+# OttoFlow workflow that calls the in-cluster kagent k8s-agent over plaintext
+# http:// (allowInsecureHTTP). See README.md for the allowInsecureHTTP policy.
+#
+# Usage:
+#   ottoflow run kagent-quickstart --input clusterName=my-cluster
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: kagent-quickstart
+  namespace: default
+spec:
+  inputs:
+    - name: clusterName
+      description: Name of the cluster to analyze
+      required: true
+    - name: namespace
+      description: "Namespace to analyze (empty = all namespaces)"
+      default: ""
+
+  steps:
+    - name: analyzeCluster
+      message: Calling the in-cluster kagent k8s-agent to analyze cluster health
+      externalAgentRef:
+        # kagent exposes each agent's A2A endpoint under the kagent controller Service.
+        url: "http://kagent-controller.kagent.svc:8083/api/a2a/kagent/k8s-agent"
+        protocol: a2a
+        allowInsecureHTTP: true
+        prompt: >-
+          "Analyze the health of cluster " + inputs.clusterName +
+          (inputs.namespace != "" ? " in namespace " + inputs.namespace : " across all namespaces") +
+          ". Identify any policy violations, resource issues, or anomalies."
+        timeout: "10m"
+      outputs:
+        - name: healthSummary
+          expression: "a2aResult.artifacts[0].parts[0].text"
+
+    - name: reportResults
+      message: Summarize analysis results
+      dependsOn:
+        - analyzeCluster
+      expressions:
+        - name: report
+          expression: |
+            "Cluster health analysis for " + inputs.clusterName + ":\n" + variables.healthSummary
+      outputs:
+        - name: report
+          expression: "expressions.report"
+
+  outputs:
+    - name: healthReport
+      expression: "variables.healthSummary"
+    - name: report
+      expression: "variables.report"

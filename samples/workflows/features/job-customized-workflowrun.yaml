@@ -1,0 +1,32 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-query-job-customized
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-query-example
+    namespace: ottoflow
+  clusterRef:
+    local: true
+  execution:
+    job:
+      image: ghcr.io/nirmata/ottoflow/workflow-runner:latest
+      serviceAccountName: controller-manager
+      env:
+        - name: LOG_LEVEL
+          value: debug
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      activeDeadlineSeconds: 1800
+  inputValues:
+    podName: "nginx"
+    namespace: "ottoflow"
+    appName: "my-app"

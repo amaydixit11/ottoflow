@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  timeout: 10m
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - dupl
+    - copyloopvar  # Replaces exportloopref (Go 1.22+)
+    - errcheck
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - prealloc
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  exclusions:
+    rules:
+      - path: "api/*"
+        linters:
+          - lll
+      - path: "internal/*"
+        linters:
+          - dupl
+          - lll
+  settings:
+    gocyclo:
+      min-complexity: 50
+    goconst:
+      min-len: 4
+      min-occurrences: 5
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

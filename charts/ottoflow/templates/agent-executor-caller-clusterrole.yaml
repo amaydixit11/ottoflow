@@ -1,0 +1,16 @@
+{{- if and .Values.agentExecutor.enabled .Values.rbac.create }}
+# ClusterRole for "who can call the agent executor". Bound to controller and runner SAs.
+# The agent executor uses SubjectAccessReview against this permission when using RBAC auth mode.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-agent-executor-caller
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: agent-executor-caller
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["agent-executor-caller"]
+    verbs: ["get"]
+{{- end }}

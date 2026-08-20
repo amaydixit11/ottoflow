@@ -1,0 +1,73 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: child-workflow
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: message
+      description: "Message to process"
+      default: "Hello"
+    - name: multiplier
+      description: "Multiplier value"
+      default: "1"
+  steps:
+    - name: processMessage
+      message: "Process the input message"
+      expressions:
+        - name: processed
+          expression: 'inputs["message"] + " processed"'
+        - name: count
+          expression: 'int(inputs["multiplier"]) * 2'
+      outputs:
+        - name: result
+          expression: 'format("%s (count: %d)", expressions["processed"], expressions["count"])'
+  outputs:
+    - name: final-result
+      expression: 'variables.result'
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: parent-workflow-with-reference
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: user-name
+      description: "User name"
+      default: "admin"
+  steps:
+    - name: callChildWorkflow
+      message: "Call child workflow as sub-workflow"
+      workflowRef:
+        name: child-workflow
+        namespace: ottoflow
+        inputs:
+          message: 'format("Hello from %s", inputs["user-name"])'
+          multiplier: '"3"'
+    - name: useChildOutput
+      message: "Use output from child workflow"
+      dependsOn:
+        - callChildWorkflow
+      expressions:
+        - name: child-result
+          expression: 'variables["final-result"]'
+      outputs:
+        - name: summary
+          expression: 'format("Parent received: %s", expressions["child-result"])'
+  outputs:
+    - name: parent-summary
+      expression: 'variables.summary'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: parent-workflow-with-reference-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: parent-workflow-with-reference
+    namespace: ottoflow
+  inputValues:
+    user-name: "test-user"

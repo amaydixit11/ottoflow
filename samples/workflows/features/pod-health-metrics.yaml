@@ -1,0 +1,35 @@
+# Pod health check workflow with custom Prometheus metrics
+# This workflow counts pods in a namespace and publishes metrics for monitoring
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: pod-health-metrics
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: namespace
+      description: "Namespace to check"
+      default: "default"
+  steps:
+    - name: countPods
+      message: "Count pods in namespace"
+      resourceQuery:
+        apiVersion: v1
+        resource: Pod
+        namespace: "inputs.namespace"
+        outputs:
+          totalCount: "size(items)"
+  outputs:
+    - name: totalPods
+      expression: "variables.totalCount"
+      metric:
+        name: total_pods
+        type: gauge
+        help: "Total number of pods in the namespace"
+        labels:
+          - name: workflow
+            value: '"pod-health-metrics"'
+          - name: namespace
+            value: "string(inputs.namespace)"
+    - name: summary
+      expression: '{"total": variables.totalCount, "namespace": inputs.namespace}'

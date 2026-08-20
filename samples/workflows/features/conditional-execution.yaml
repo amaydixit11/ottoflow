@@ -1,0 +1,80 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: conditional-execution
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: environment
+      description: "Environment name (dev, staging, prod)"
+      default: "dev"
+    - name: deploy-feature
+      description: "Whether to deploy feature"
+      default: "false"
+  steps:
+    - name: checkEnvironment
+      message: "Check environment type"
+      outputs:
+        - name: env-type
+          expression: inputs.environment
+        - name: is-prod
+          expression: inputs.environment == "prod"
+    
+    - name: deployToDev
+      message: "Deploy to development environment"
+      matchConditions:
+        - name: is-dev-environment
+          expression: inputs.environment == "dev"
+      outputs:
+        - name: deployed
+          expression: '"dev"'
+    
+    - name: deployToProd
+      message: "Deploy to production environment"
+      dependsOn:
+        - checkEnvironment
+      matchConditions:
+        - name: is-production-environment
+          expression: variables["is-prod"] == true
+      outputs:
+        - name: deployed
+          expression: '"prod"'
+    
+    - name: deployFeatureFlag
+      message: "Deploy feature flag"
+      matchConditions:
+        - name: feature-flag-enabled
+          expression: inputs["deploy-feature"] == "true"
+      outputs:
+        - name: feature-deployed
+          expression: '"yes"'
+    
+    - name: finalSummary
+      message: "Generate final summary"
+      outputs:
+        - name: summary
+          expression: '"Workflow completed"'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: conditional-execution-run-dev-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: conditional-execution
+  inputValues:
+    environment: "dev"
+    deploy-feature: "false"
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: conditional-execution-run-prod-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: conditional-execution
+  inputValues:
+    environment: "prod"
+    deploy-feature: "true"

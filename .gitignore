@@ -1,0 +1,52 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/*
+bin/agent-executor
+bin/workflow-runner
+Dockerfile.cross
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Go workspace file
+go.work
+
+# Kubernetes Generated files - skip generated files, except for vendored files
+!vendor/**/zz_generated.*
+
+# editor and IDE paraphernalia
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Generated manifests from Helm
+config/generated/
+.gitnexus
+.claude
+# Local agent instruction files
+CLAUDE.md
+AGENTS.md
+.worktrees
+
+# Local scratch state / secrets - never track these
+secret*.yaml
+argo-obj.yaml
+cel-trig*.yaml
+.hermes/
+.hyperresearch/
+research/
+docs/superpowers/
+.DS_Store
+go.work.sum
+
+# GoReleaser output
+dist/

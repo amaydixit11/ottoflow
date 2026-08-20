@@ -1,0 +1,221 @@
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: practical-cel-examples
+  namespace: ottoflow
+spec:
+  inputs:
+    - name: imageName
+      description: Container image to validate
+      default: "nginx:latest"
+    - name: apiEndpoint
+      description: External API endpoint
+      default: "https://httpbin.org/json"
+    - name: configJson
+      description: Configuration JSON string
+      default: '{"version": "1.2.3", "replicas": 3, "resources": {"cpu": "500m", "memory": "512Mi"}}'
+    - name: podName
+      description: Pod name to check
+      default: "my-pod"
+
+  steps:
+    # Practical: Validate container image format
+    - name: validateImage
+      expressions:
+        - name: imageObj
+          expression: 'image(inputs.imageName)'
+        - name: isValidImage
+          expression: 'isImage(inputs.imageName)'
+        - name: registry
+          expression: 'image(inputs.imageName).registry()'
+        - name: requiresDigest
+          expression: '!image(inputs.imageName).containsDigest()'
+        - name: validationMessage
+          expression: 'expressions.requiresDigest ? "Image must use digest instead of tag" : "Image format is valid"'
+      outputs:
+        - name: isValid
+          expression: 'expressions.isValidImage && !expressions.requiresDigest'
+        - name: registry
+          expression: 'expressions.registry'
+        - name: message
+          expression: 'expressions.validationMessage'
+
+    # Practical: Parse and validate configuration
+    - name: parseConfig
+      expressions:
+        - name: config
+          expression: 'json.unmarshal(inputs.configJson)'
+        - name: version
+          expression: 'json.unmarshal(inputs.configJson).version'
+        - name: isValidVersion
+          expression: 'isSemver(json.unmarshal(inputs.configJson).version)'
+        - name: replicas
+          expression: 'int(json.unmarshal(inputs.configJson).replicas)'
+        - name: cpuQuantity
+          expression: 'quantity(json.unmarshal(inputs.configJson).resources.cpu)'
+        - name: memoryQuantity
+          expression: 'quantity(json.unmarshal(inputs.configJson).resources.memory)'
+        - name: totalMemory
+          expression: 'quantity(json.unmarshal(inputs.configJson).resources.memory).asApproximateFloat() * double(expressions.replicas)'
+      outputs:
+        - name: version
+          expression: 'expressions.version'
+        - name: isValidVersion
+          expression: 'expressions.isValidVersion'
+        - name: replicas
+          expression: 'expressions.replicas'
+        - name: totalMemory
+          expression: 'expressions.totalMemory'
+
+    # Practical: Health check external service
+    - name: healthCheck
+      expressions:
+        - name: isValidUrl
+          expression: 'isURL(inputs.apiEndpoint)'
+        - name: urlObj
+          expression: 'url(inputs.apiEndpoint)'
+        - name: isHttps
+          expression: 'url(inputs.apiEndpoint).getScheme() == "https"'
+        - name: response
+          expression: 'expressions.isValidUrl ? http.Get(inputs.apiEndpoint) : null'
+        - name: isHealthy
+          expression: 'expressions.?response.status.orValue(null) != null'
+      outputs:
+        - name: isHealthy
+          expression: 'expressions.isHealthy'
+        - name: scheme
+          expression: 'expressions.isHttps ? "https" : "http"'
+
+    # Practical: Generate unique identifiers
+    - name: generateIds
+      expressions:
+        - name: requestId
+          expression: 'random("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}")'
+        - name: shortId
+          expression: 'random("[A-Z0-9]{6}")'
+        - name: timestamp
+          expression: 'time.now()'
+        - name: hash
+          expression: 'sha256(string(expressions.requestId) + string(expressions.timestamp))'
+      outputs:
+        - name: requestId
+          expression: 'expressions.requestId'
+        - name: shortId
+          expression: 'expressions.shortId'
+        - name: hash
+          expression: 'expressions.hash'
+
+    # Practical: Format validation
+    - name: validateFormats
+      expressions:
+        - name: podName
+          expression: 'inputs.podName'
+        - name: isValidDnsLabel
+          expression: '!format.dns1123Label().validate(inputs.podName).hasValue()'
+        - name: dnsErrors
+          expression: 'format.dns1123Label().validate(inputs.podName).orValue([])'
+        - name: isValidUuid
+          expression: '!format.uuid().validate("550e8400-e29b-41d4-a716-446655440000").hasValue()'
+      outputs:
+        - name: isValidDnsLabel
+          expression: 'expressions.isValidDnsLabel'
+        - name: dnsErrors
+          expression: 'expressions.dnsErrors'
+
+    # Practical: Network validation
+    - name: validateNetwork
+      expressions:
+        - name: ipAddress
+          expression: '"192.168.1.100"'
+        - name: cidrBlock
+          expression: '"192.168.0.0/16"'
+        - name: isValidIp
+          expression: 'isIP(expressions.ipAddress)'
+        - name: isValidCidr
+          expression: 'isCIDR(expressions.cidrBlock)'
+        - name: ipInCidr
+          expression: 'cidr(expressions.cidrBlock).containsIP(ip(expressions.ipAddress))'
+        - name: isPrivateIp
+          expression: 'ip(expressions.ipAddress).isLinkLocalUnicast() || (ip(expressions.ipAddress).family() == 4 && cidr("10.0.0.0/8").containsIP(ip(expressions.ipAddress))) || cidr("172.16.0.0/12").containsIP(ip(expressions.ipAddress)) || cidr("192.168.0.0/16").containsIP(ip(expressions.ipAddress))'
+      outputs:
+        - name: isValidIp
+          expression: 'expressions.isValidIp'
+        - name: ipInCidr
+          expression: 'expressions.ipInCidr'
+        - name: isPrivateIp
+          expression: 'expressions.isPrivateIp'
+
+    # Practical: Version comparison
+    - name: compareVersions
+      expressions:
+        - name: currentVersion
+          expression: '"1.2.3"'
+        - name: minVersion
+          expression: '"1.0.0"'
+        - name: maxVersion
+          expression: '"2.0.0"'
+        - name: meetsMinVersion
+          expression: 'semver(expressions.currentVersion).compareTo(semver(expressions.minVersion)) >= 0'
+        - name: meetsMaxVersion
+          expression: 'semver(expressions.currentVersion).compareTo(semver(expressions.maxVersion)) <= 0'
+        - name: isCompatible
+          expression: 'expressions.meetsMinVersion && expressions.meetsMaxVersion'
+        - name: majorVersion
+          expression: 'semver(expressions.currentVersion).major()'
+      outputs:
+        - name: isCompatible
+          expression: 'expressions.isCompatible'
+        - name: majorVersion
+          expression: 'expressions.majorVersion'
+
+    # Practical: Resource quantity calculations
+    - name: calculateResources
+      expressions:
+        - name: cpuRequest
+          expression: 'quantity("500m")'
+        - name: memoryRequest
+          expression: 'quantity("512Mi")'
+        - name: replicas
+          expression: '3'
+        - name: totalCpu
+          expression: 'quantity("500m").asApproximateFloat() * double(expressions.replicas)'
+        - name: totalMemory
+          expression: 'quantity("512Mi").asApproximateFloat() * double(expressions.replicas)'
+        - name: memoryInGi
+          expression: 'quantity("512Mi").asApproximateFloat() / 1024.0'
+        - name: exceedsLimit
+          expression: 'quantity("512Mi").isGreaterThan(quantity("256Mi"))'
+      outputs:
+        - name: totalCpu
+          expression: 'expressions.totalCpu'
+        - name: totalMemory
+          expression: 'expressions.totalMemory'
+        - name: exceedsLimit
+          expression: 'expressions.exceedsLimit'
+
+    # Practical: List operations on resource data
+    - name: aggregateData
+      expressions:
+        - name: podPhases
+          expression: '["Running", "Pending", "Running", "Failed"]'
+        - name: runningCount
+          expression: 'expressions.podPhases.filter(p, p == "Running").size()'
+        - name: allRunning
+          expression: 'expressions.podPhases.all(p, p == "Running")'
+        - name: cpuValues
+          expression: '[500, 1000, 750, 500]'
+        - name: totalCpu
+          expression: 'expressions.cpuValues.sum()'
+        - name: avgCpu
+          expression: 'double(expressions.cpuValues.sum()) / double(size(expressions.cpuValues))'
+        - name: minCpu
+          expression: 'expressions.cpuValues.min()'
+        - name: maxCpu
+          expression: 'expressions.cpuValues.max()'
+      outputs:
+        - name: runningCount
+          expression: 'expressions.runningCount'
+        - name: totalCpu
+          expression: 'expressions.totalCpu'
+        - name: avgCpu
+          expression: 'expressions.avgCpu'

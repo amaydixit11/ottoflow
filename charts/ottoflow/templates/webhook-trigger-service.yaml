@@ -1,0 +1,23 @@
+{{- if and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled .Values.controller.webhookTrigger.service .Values.controller.webhookTrigger.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-webhook-trigger
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: webhook-trigger
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controller.webhookTrigger.service.type }}
+  selector:
+    {{- include "ottoflow.selectorLabels.n6" . }}
+  ports:
+    - name: webhook-trigger
+      port: {{ .Values.controller.webhookTrigger.service.port }}
+      targetPort: webhook-trigger
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,55 @@
+# Example: MCPServer with OAuth2 client credentials authentication
+# OAuth2 is used for machine-to-machine auth when connecting to MCP servers
+# (e.g., SaaS-hosted MCP servers that require OAuth 2.0/2.1)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-oauth2-credentials
+  namespace: ottoflow
+type: Opaque
+stringData:
+  client_id: "your-oauth2-client-id"
+  client_secret: "your-oauth2-client-secret"
+
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: MCPServer
+metadata:
+  name: oauth2-mcp-server
+  namespace: ottoflow
+spec:
+  transport:
+    type: http
+    address: "https://mcp.example.com/sse"
+  timeout: "60s"
+  auth:
+    type: oauth2
+    oauth2:
+      tokenURL: "https://auth.example.com/oauth/token"
+      clientCredentialsRef:
+        name: mcp-oauth2-credentials
+        namespace: ottoflow
+      scopes:
+        - "mcp:read"
+        - "mcp:tools"
+
+---
+# Alternative: ClientID inline with secret for client_secret only
+# apiVersion: ottoflow.nirmata.io/v1alpha1
+# kind: MCPServer
+# metadata:
+#   name: oauth2-mcp-server-alt
+# spec:
+#   transport:
+#     type: http
+#     address: "https://mcp.example.com/sse"
+#   auth:
+#     type: oauth2
+#     oauth2:
+#       tokenURL: "https://auth.example.com/oauth/token"
+#       clientId: "my-client-id"
+#       clientSecretRef:
+#         name: mcp-oauth2-credentials
+#         key: client_secret
+#       scopes:
+#         - "mcp:read"

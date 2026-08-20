@@ -1,0 +1,631 @@
+# Resource Cleanup — Kubernetes unused resource detection and cleanup report
+#
+# Scans the cluster for unused and stale resources using Kyverno-style cleanup criteria.
+#
+# Detects 14 categories of unused/stale resources:
+#   - Unused Services (no matching pods)
+#   - Unused ConfigMaps (not referenced by pods)
+#   - Unused PVCs (bound but not mounted)
+#   - Unused PVs (available/released/failed)
+#   - Unused Ingresses (referencing non-existent backend services)
+#   - Unused NetworkPolicies (no matching pods)
+#   - Unused PodDisruptionBudgets (no matching pods)
+#   - Orphan Pods (no owner references)
+#   - Idle Deployments (scaled to 0 replicas)
+#   - Idle StatefulSets (scaled to 0 replicas)
+#   - Stale ReplicaSets (0 replicas, no active pods)
+#   - CrashLoopBackOff Pods
+#   - Empty Namespaces (no workloads)
+#   - Resources in the default namespace
+#
+# Inputs:
+#   runId        — optional external run correlation ID
+#   namespace    — limit scan to one namespace (optional; scans all if blank)
+#   clusterName  — display label for the report; defaults to "cluster"
+#
+# The workflow publishes markdownReport + assessmentSummary in status.outputs.
+#
+# Test locally: ottoflow run samples/workflows/production/resource-cleanup.yaml \
+#                 --input clusterName=my-cluster
+#
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: resource-cleanup
+  namespace: ottoflow
+  labels:
+    app: resource-cleanup
+  annotations:
+    description: >-
+      Scans Kubernetes clusters for unused and stale resources. Detects unused
+      services, configmaps, PVCs, PVs, ingress, network policies, PDBs, orphan
+      pods, idle deployments/statefulsets, stale replicasets, CrashLoopBackOff
+      pods, empty namespaces, and resources in the default namespace.
+      Generates a comprehensive cleanup report with prioritized recommendations.
+spec:
+  inputs:
+    - name: runId
+      description: "Optional external run correlation ID."
+      default: "local"
+      required: false
+    - name: clusterName
+      description: "Display label for the report. Defaults to \"cluster\"."
+      default: "cluster"
+      required: false
+    - name: namespace
+      description: "Target namespace to scan. Leave empty to scan all namespaces."
+      default: ""
+      required: false
+
+  celCostLimit: 500000000
+
+  events:
+    enabled: true
+    level: WorkflowAndSteps
+
+  outputs:
+    - name: markdownReport
+      expression: 'variables.?markdownReport.orValue("Report generation skipped — set NIRMATA_LLM_APIKEY to enable LLM-powered report.")'
+    - name: assessmentSummary
+      expression: 'variables.assessmentSummary'
+    - name: runId
+      expression: 'inputs.runId'
+    - name: totalUnusedResources
+      expression: 'variables.totalUnusedResources'
+      metric:
+        name: resource_cleanup_unused_total
+        type: gauge
+        help: "Total number of unused resources detected across the cluster"
+        labels:
+          - name: cluster
+            value: 'inputs.clusterName'
+    - name: crashLoopPodCount
+      expression: 'size(variables.crashLoopPods)'
+      metric:
+        name: resource_cleanup_crashloop_pods
+        type: gauge
+        help: "Number of pods in CrashLoopBackOff state"
+        labels:
+          - name: cluster
+            value: 'inputs.clusterName'
+
+  steps:
+    # ── Step 1: Collect core cluster resources ─────────────────────
+    - name: collectClusterData
+      message: "Collect namespaces, pods, deployments, statefulsets, services, and configmaps"
+      expressions:
+        - name: namespaces
+          expression: 'dyn(resource.List("v1", "Namespace", "", {})).items'
+        - name: namespaceNames
+          expression: |-
+            inputs.?namespace.orValue("") != ""
+              ? [inputs.?namespace.orValue("")]
+              : expressions.namespaces.map(ns, ns.metadata.name)
+                .filter(ns, ns != "kube-system" && ns != "kube-public" && ns != "kube-node-lease")
+        - name: pods
+          expression: |-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName,
+                  dyn(resource.List("v1", "Pod", nsName, {})).items).flatten()
+              : []
+        - name: deployments
+          expression: |-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName,
+                  dyn(resource.List("apps/v1", "Deployment", nsName, {})).items).flatten()
+              : []
+        - name: statefulsets
+          expression: |-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName,
+                  dyn(resource.List("apps/v1", "StatefulSet", nsName, {})).items).flatten()
+              : []
+        - name: services
+          expression: |-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName,
+                  dyn(resource.List("v1", "Service", nsName, {})).items).flatten()
+              : []
+        - name: configmaps
+          expression: |-
+            expressions.namespaceNames.size() > 0
+              ? expressions.namespaceNames.map(nsName,
+                  dyn(resource.List("v1", "ConfigMap", nsName, {})).items).flatten()
+              : []
+      outputs:
+        - name: namespaceNames
+          expression: 'expressions.namespaceNames'
+        - name: namespaces
+          expression: 'expressions.namespaces'
+        - name: pods
+          expression: 'expressions.pods'
+        - name: deployments
+          expression: 'expressions.deployments'
+        - name: statefulsets
+          expression: 'expressions.statefulsets'
+        - name: services
+          expression: 'expressions.services'
+        - name: configmaps
+          expression: 'expressions.configmaps'
+
+    # ── Step 2: Collect storage, network, and additional resources ──
+    - name: collectAdditionalResources
+      message: "Collect PVCs, PVs, ingresses, network policies, PDBs, and replicasets"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: pvcs
+          expression: |-
+            variables.namespaceNames.size() > 0
+              ? variables.namespaceNames.map(nsName,
+                  dyn(resource.List("v1", "PersistentVolumeClaim", nsName, {})).items).flatten()
+              : []
+        - name: pvs
+          expression: 'dyn(resource.List("v1", "PersistentVolume", "", {})).items'
+        - name: ingresses
+          expression: |-
+            variables.namespaceNames.size() > 0
+              ? variables.namespaceNames.map(nsName,
+                  dyn(resource.List("networking.k8s.io/v1", "Ingress", nsName, {})).items).flatten()
+              : []
+        - name: networkPolicies
+          expression: |-
+            variables.namespaceNames.size() > 0
+              ? variables.namespaceNames.map(nsName,
+                  dyn(resource.List("networking.k8s.io/v1", "NetworkPolicy", nsName, {})).items).flatten()
+              : []
+        - name: pdbs
+          expression: |-
+            variables.namespaceNames.size() > 0
+              ? variables.namespaceNames.map(nsName,
+                  dyn(resource.List("policy/v1", "PodDisruptionBudget", nsName, {})).items).flatten()
+              : []
+        - name: replicasets
+          expression: |-
+            variables.namespaceNames.size() > 0
+              ? variables.namespaceNames.map(nsName,
+                  dyn(resource.List("apps/v1", "ReplicaSet", nsName, {})).items).flatten()
+              : []
+      outputs:
+        - name: pvcs
+          expression: 'expressions.pvcs'
+        - name: pvs
+          expression: 'expressions.pvs'
+        - name: ingresses
+          expression: 'expressions.ingresses'
+        - name: networkPolicies
+          expression: 'expressions.networkPolicies'
+        - name: pdbs
+          expression: 'expressions.pdbs'
+        - name: replicasets
+          expression: 'expressions.replicasets'
+
+    # ── Step 3: Detect unused services ─────────────────────────────
+    - name: detectUnusedServices
+      message: "Detect services with no matching pods based on label selectors"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: unusedServices
+          expression: |-
+            variables.services.filter(svc,
+              svc.metadata.name != "kubernetes" &&
+              has(svc.spec) && has(svc.spec.selector) &&
+              size(svc.spec.selector) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == svc.metadata.namespace &&
+                has(p.metadata.labels) &&
+                svc.spec.selector.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == svc.spec.selector[key]
+                )
+              )
+            ).map(svc, svc.metadata.namespace + "/" + svc.metadata.name)
+      outputs:
+        - name: unusedServices
+          expression: 'expressions.unusedServices'
+
+    # ── Step 4: Detect unused configmaps ───────────────────────────
+    - name: detectUnusedConfigMaps
+      message: "Detect configmaps not referenced by any pod via volumes or envFrom"
+      dependsOn:
+        - collectClusterData
+      expressions:
+        - name: unusedConfigMaps
+          expression: |-
+            variables.configmaps.filter(cm,
+              cm.metadata.name != "kube-root-ca.crt" &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == cm.metadata.namespace &&
+                has(p.spec) && (
+                  (has(p.spec.volumes) && p.spec.volumes.exists(v,
+                    has(v.configMap) && v.configMap.name == cm.metadata.name)) ||
+                  (has(p.spec.containers) && p.spec.containers.exists(c,
+                    has(c.envFrom) && c.envFrom.exists(e,
+                      has(e.configMapRef) && e.configMapRef.name == cm.metadata.name)))
+                )
+              )
+            ).map(cm, cm.metadata.namespace + "/" + cm.metadata.name)
+      outputs:
+        - name: unusedConfigMaps
+          expression: 'expressions.unusedConfigMaps'
+
+    # ── Step 5: Detect unused volumes ──────────────────────────────
+    - name: detectUnusedVolumes
+      message: "Detect unused PVCs (bound but not mounted) and PVs (available/released/failed)"
+      dependsOn:
+        - collectClusterData
+        - collectAdditionalResources
+      expressions:
+        - name: unusedPVCs
+          expression: |-
+            variables.pvcs.filter(pvc,
+              has(pvc.status) && pvc.status.phase == "Bound" &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == pvc.metadata.namespace &&
+                has(p.spec) && has(p.spec.volumes) &&
+                p.spec.volumes.exists(v,
+                  has(v.persistentVolumeClaim) &&
+                  v.persistentVolumeClaim.claimName == pvc.metadata.name)
+              )
+            ).map(pvc, pvc.metadata.namespace + "/" + pvc.metadata.name)
+        - name: unusedPVs
+          expression: |-
+            variables.pvs.filter(pv,
+              has(pv.status) &&
+              (pv.status.phase == "Available" || pv.status.phase == "Released" || pv.status.phase == "Failed")
+            ).map(pv, pv.metadata.name)
+      outputs:
+        - name: unusedPVCs
+          expression: 'expressions.unusedPVCs'
+        - name: unusedPVs
+          expression: 'expressions.unusedPVs'
+
+    # ── Step 6: Detect stale workloads ─────────────────────────────
+    - name: detectStaleWorkloads
+      message: "Detect orphan pods, idle deployments/statefulsets, stale replicasets, and CrashLoopBackOff pods"
+      dependsOn:
+        - collectClusterData
+        - collectAdditionalResources
+      expressions:
+        - name: orphanPods
+          expression: |-
+            variables.pods.filter(p,
+              !has(p.metadata.ownerReferences) ||
+              size(p.metadata.ownerReferences) == 0
+            ).map(p, p.metadata.namespace + "/" + p.metadata.name)
+        - name: idleDeployments
+          expression: |-
+            variables.deployments.filter(d,
+              has(d.spec) && has(d.spec.replicas) && d.spec.replicas == 0
+            ).map(d, d.metadata.namespace + "/" + d.metadata.name)
+        - name: idleStatefulSets
+          expression: |-
+            variables.statefulsets.filter(ss,
+              has(ss.spec) && has(ss.spec.replicas) && ss.spec.replicas == 0
+            ).map(ss, ss.metadata.namespace + "/" + ss.metadata.name)
+        - name: staleReplicaSets
+          expression: |-
+            variables.replicasets.filter(rs,
+              has(rs.spec) && has(rs.spec.replicas) && rs.spec.replicas == 0 &&
+              has(rs.status) && has(rs.status.replicas) && rs.status.replicas == 0
+            ).map(rs, rs.metadata.namespace + "/" + rs.metadata.name)
+        - name: crashLoopPods
+          expression: |-
+            variables.pods.filter(p,
+              has(p.status) && has(p.status.containerStatuses) &&
+              p.status.containerStatuses.exists(cs,
+                has(cs.state) && has(cs.state.waiting) &&
+                has(cs.state.waiting.reason) &&
+                cs.state.waiting.reason == "CrashLoopBackOff"
+              )
+            ).map(p, p.metadata.namespace + "/" + p.metadata.name)
+      outputs:
+        - name: orphanPods
+          expression: 'expressions.orphanPods'
+        - name: idleDeployments
+          expression: 'expressions.idleDeployments'
+        - name: idleStatefulSets
+          expression: 'expressions.idleStatefulSets'
+        - name: staleReplicaSets
+          expression: 'expressions.staleReplicaSets'
+        - name: crashLoopPods
+          expression: 'expressions.crashLoopPods'
+
+    # ── Step 7: Detect unused network resources ────────────────────
+    - name: detectUnusedNetworkResources
+      message: "Detect unused ingresses, network policies, and PDBs"
+      dependsOn:
+        - collectClusterData
+        - collectAdditionalResources
+      expressions:
+        - name: unusedIngresses
+          expression: |-
+            variables.ingresses.filter(ing,
+              has(ing.spec) && has(ing.spec.rules) &&
+              ing.spec.rules.exists(rule,
+                has(rule.http) && has(rule.http.paths) &&
+                rule.http.paths.exists(path,
+                  has(path.backend) && has(path.backend.service) &&
+                  !variables.services.exists(svc,
+                    svc.metadata.namespace == ing.metadata.namespace &&
+                    svc.metadata.name == path.backend.service.name
+                  )
+                )
+              )
+            ).map(ing, ing.metadata.namespace + "/" + ing.metadata.name)
+        - name: unusedNetworkPolicies
+          expression: |-
+            variables.networkPolicies.filter(np,
+              has(np.spec) && has(np.spec.podSelector) &&
+              has(np.spec.podSelector.matchLabels) &&
+              size(np.spec.podSelector.matchLabels) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == np.metadata.namespace &&
+                has(p.metadata.labels) &&
+                np.spec.podSelector.matchLabels.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == np.spec.podSelector.matchLabels[key]
+                )
+              )
+            ).map(np, np.metadata.namespace + "/" + np.metadata.name)
+        - name: unusedPDBs
+          expression: |-
+            variables.pdbs.filter(pdb,
+              has(pdb.spec) && has(pdb.spec.selector) &&
+              has(pdb.spec.selector.matchLabels) &&
+              size(pdb.spec.selector.matchLabels) > 0 &&
+              !variables.pods.exists(p,
+                p.metadata.namespace == pdb.metadata.namespace &&
+                has(p.metadata.labels) &&
+                pdb.spec.selector.matchLabels.all(key,
+                  key in p.metadata.labels &&
+                  p.metadata.labels[key] == pdb.spec.selector.matchLabels[key]
+                )
+              )
+            ).map(pdb, pdb.metadata.namespace + "/" + pdb.metadata.name)
+      outputs:
+        - name: unusedIngresses
+          expression: 'expressions.unusedIngresses'
+        - name: unusedNetworkPolicies
+          expression: 'expressions.unusedNetworkPolicies'
+        - name: unusedPDBs
+          expression: 'expressions.unusedPDBs'
+
+    # ── Step 8: Detect namespace issues ────────────────────────────
+    - name: detectNamespaceIssues
+      message: "Detect empty namespaces and resources in the default namespace"
+      dependsOn:
+        - collectClusterData
+        - collectAdditionalResources
+      matchConditions:
+        - name: allNamespacesScan
+          expression: 'inputs.?namespace.orValue("") == ""'
+      expressions:
+        - name: systemNamespaces
+          expression: '["kube-system", "kube-public", "kube-node-lease", "default", "ottoflow"]'
+        - name: emptyNamespaces
+          expression: |-
+            variables.namespaces
+              .filter(ns,
+                !expressions.systemNamespaces.exists(s, s == ns.metadata.name) &&
+                !variables.pods.exists(p, p.metadata.namespace == ns.metadata.name) &&
+                !variables.deployments.exists(d, d.metadata.namespace == ns.metadata.name) &&
+                !variables.statefulsets.exists(ss, ss.metadata.namespace == ns.metadata.name) &&
+                !variables.services.exists(svc,
+                  svc.metadata.namespace == ns.metadata.name && svc.metadata.name != "kubernetes")
+              )
+              .map(ns, ns.metadata.name)
+        - name: defaultNamespaceResources
+          expression: |-
+            {
+              "pods": dyn(variables.pods.filter(p, p.metadata.namespace == "default").map(p, p.metadata.name)),
+              "deployments": dyn(variables.deployments.filter(d, d.metadata.namespace == "default").map(d, d.metadata.name)),
+              "services": dyn(variables.services.filter(s, s.metadata.namespace == "default" && s.metadata.name != "kubernetes").map(s, s.metadata.name)),
+              "configmaps": dyn(variables.configmaps.filter(cm, cm.metadata.namespace == "default" && cm.metadata.name != "kube-root-ca.crt").map(cm, cm.metadata.name))
+            }
+        - name: defaultNamespaceResourceCount
+          expression: |-
+            size(variables.pods.filter(p, p.metadata.namespace == "default")) +
+            size(variables.deployments.filter(d, d.metadata.namespace == "default")) +
+            size(variables.services.filter(s, s.metadata.namespace == "default" && s.metadata.name != "kubernetes")) +
+            size(variables.configmaps.filter(cm, cm.metadata.namespace == "default" && cm.metadata.name != "kube-root-ca.crt"))
+      outputs:
+        - name: emptyNamespaces
+          expression: 'expressions.emptyNamespaces'
+        - name: defaultNamespaceResources
+          expression: 'expressions.defaultNamespaceResources'
+        - name: defaultNamespaceResourceCount
+          expression: 'expressions.defaultNamespaceResourceCount'
+
+    # ── Step 9: Ensure namespace defaults (when step 8 is skipped) ─
+    - name: ensureNamespaceDefaults
+      message: "Set default values when namespace issues step is skipped"
+      dependsOn:
+        - detectNamespaceIssues
+      expressions:
+        - name: emptyNs
+          expression: 'variables.?emptyNamespaces.orValue([])'
+        - name: defaultNsResources
+          expression: 'variables.?defaultNamespaceResources.orValue({"pods": [], "deployments": [], "services": [], "configmaps": []})'
+        - name: defaultNsCount
+          expression: 'int(variables.?defaultNamespaceResourceCount.orValue(0))'
+      outputs:
+        - name: emptyNamespaces
+          expression: 'expressions.emptyNs'
+        - name: defaultNamespaceResources
+          expression: 'expressions.defaultNsResources'
+        - name: defaultNamespaceResourceCount
+          expression: 'expressions.defaultNsCount'
+
+    # ── Step 10: Build assessment summary ──────────────────────────
+    - name: buildAssessmentSummary
+      message: "Aggregate all findings into a structured assessment summary"
+      dependsOn:
+        - detectUnusedServices
+        - detectUnusedConfigMaps
+        - detectUnusedVolumes
+        - detectStaleWorkloads
+        - detectUnusedNetworkResources
+        - ensureNamespaceDefaults
+        - detectNamespaceIssues
+      expressions:
+        - name: totalUnusedResources
+          expression: |-
+            size(variables.unusedServices) +
+            size(variables.unusedConfigMaps) +
+            size(variables.unusedPVCs) +
+            size(variables.unusedPVs) +
+            size(variables.unusedIngresses) +
+            size(variables.unusedNetworkPolicies) +
+            size(variables.unusedPDBs) +
+            size(variables.orphanPods) +
+            size(variables.idleDeployments) +
+            size(variables.idleStatefulSets) +
+            size(variables.staleReplicaSets) +
+            size(variables.crashLoopPods) +
+            size(variables.emptyNamespaces) +
+            int(variables.defaultNamespaceResourceCount)
+        - name: summaryPart1
+          expression: |-
+            format('{"cluster":"%s","totalUnusedResources":%d,"findings":{',
+              inputs.clusterName,
+              expressions.totalUnusedResources)
+        - name: summaryPart2
+          expression: |-
+            format('"unusedServices":%d,"unusedConfigMaps":%d,"unusedPVCs":%d,"unusedPVs":%d,"unusedIngresses":%d,"unusedNetworkPolicies":%d,"unusedPDBs":%d,',
+              size(variables.unusedServices),
+              size(variables.unusedConfigMaps),
+              size(variables.unusedPVCs),
+              size(variables.unusedPVs),
+              size(variables.unusedIngresses),
+              size(variables.unusedNetworkPolicies),
+              size(variables.unusedPDBs))
+        - name: summaryPart3
+          expression: |-
+            format('"orphanPods":%d,"idleDeployments":%d,"idleStatefulSets":%d,"staleReplicaSets":%d,"crashLoopPods":%d,"emptyNamespaces":%d,"defaultNamespaceResources":%d}}',
+              size(variables.orphanPods),
+              size(variables.idleDeployments),
+              size(variables.idleStatefulSets),
+              size(variables.staleReplicaSets),
+              size(variables.crashLoopPods),
+              size(variables.emptyNamespaces),
+              int(variables.defaultNamespaceResourceCount))
+      outputs:
+        - name: assessmentSummary
+          expression: 'expressions.summaryPart1 + expressions.summaryPart2 + expressions.summaryPart3'
+        - name: totalUnusedResources
+          expression: 'expressions.totalUnusedResources'
+
+    # ── Step 11: Generate cleanup report via LLM agent ─────────────
+    - name: generateReport
+      message: "Generate resource cleanup Markdown report"
+      failurePolicy: Continue
+      dependsOn:
+        - buildAssessmentSummary
+        - detectStaleWorkloads
+        - detectUnusedConfigMaps
+        - detectNamespaceIssues
+        - detectUnusedNetworkResources
+        - ensureNamespaceDefaults
+        - detectUnusedServices
+        - detectUnusedVolumes
+      agentRef:
+        name: resource-cleanup-agent
+        namespace: ottoflow
+        additionalPrompts:
+          - |-
+            format(
+              "Produce one Markdown document only (no preamble).\n\n" +
+              "# Resource Cleanup Report — %s\n\n" +
+              "## Assessment Summary\n```json\n%s\n```\n\n" +
+              "## Unused Services (no matching pods)\n%v\n\n" +
+              "## Unused ConfigMaps (not referenced by pods)\n%v\n\n" +
+              "## Unused PVCs (bound but not mounted)\n%v\n\n" +
+              "## Unused PVs (available/released/failed)\n%v\n\n" +
+              "## Unused Ingresses (referencing non-existent services)\n%v\n\n" +
+              "## Unused Network Policies (no matching pods)\n%v\n\n" +
+              "## Unused PodDisruptionBudgets (no matching pods)\n%v\n\n" +
+              "## Orphan Pods (no owner references)\n%v\n\n" +
+              "## Idle Deployments (scaled to 0 replicas)\n%v\n\n" +
+              "## Idle StatefulSets (scaled to 0 replicas)\n%v\n\n" +
+              "## Stale ReplicaSets (0 replicas)\n%v\n\n" +
+              "## CrashLoopBackOff Pods\n%v\n\n" +
+              "## Empty Namespaces\n%v\n\n" +
+              "## Default Namespace Resources\n%v\n\n" +
+              "Analyze these findings and produce a comprehensive resource cleanup report.\n" +
+              "Prioritize findings by severity: Critical (CrashLoopBackOff, orphan pods), " +
+              "High (unused PVCs/PVs, idle deployments), Medium (unused services/configmaps, " +
+              "stale replicasets), Low (empty namespaces, default namespace resources).\n" +
+              "For each category, explain the impact and provide specific cleanup recommendations.\n" +
+              "Group resources into: Safe to delete, Requires review, Requires caution.\n" +
+              "Map each finding to the corresponding Kyverno cleanup-policy category " +
+              "(unused ConfigMaps, orphaned Secrets, stale ReplicaSets, etc.).\n" +
+              "Include a summary table with resource counts per category.\n" +
+              "Never recommend automatic deletion without human review.\n",
+              inputs.clusterName,
+              variables.assessmentSummary,
+              variables.unusedServices,
+              variables.unusedConfigMaps,
+              variables.unusedPVCs,
+              variables.unusedPVs,
+              variables.unusedIngresses,
+              variables.unusedNetworkPolicies,
+              variables.unusedPDBs,
+              variables.orphanPods,
+              variables.idleDeployments,
+              variables.idleStatefulSets,
+              variables.staleReplicaSets,
+              variables.crashLoopPods,
+              variables.emptyNamespaces,
+              variables.defaultNamespaceResources
+            )
+      outputs:
+        - name: markdownReport
+          expression: 'agentResponse'
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Agent
+metadata:
+  name: resource-cleanup-agent
+  namespace: ottoflow
+  labels:
+    app: resource-cleanup
+spec:
+  modelProvider: anthropic
+  prompt: |
+    You are a Kubernetes cluster hygiene specialist focused on resource cleanup and optimization.
+
+    You analyze clusters for unused, stale, and orphaned resources that waste capacity, create
+    security risks, or cause operational issues. Your recommendations follow the mark-then-validate
+    pattern commonly used by Kyverno cleanup policies.
+
+    Produce a comprehensive Markdown resource cleanup report with these sections:
+    1. **Executive Summary** — total unused resources found, estimated waste, top priorities
+    2. **Critical Findings** — CrashLoopBackOff pods, orphan pods requiring immediate attention
+    3. **Resource Cleanup by Category** — detailed breakdown with namespace/name for each type:
+       - Unused Services, ConfigMaps, PVCs, PVs, Ingresses, NetworkPolicies, PDBs
+       - Orphan Pods, Idle Deployments/StatefulSets, Stale ReplicaSets
+    4. **Namespace Hygiene** — empty namespaces, resources in default namespace
+    5. **Cleanup Recommendations** — prioritized action items grouped by safety level:
+       - Safe to delete: empty replicasets, unused PVs in Available state, empty namespaces
+       - Requires review: unused services, configmaps, PVCs, network policies, PDBs
+       - Requires caution: idle deployments/statefulsets (may be intentionally scaled down)
+    6. **Kyverno Policy Mapping** — map each finding to the corresponding Kyverno mark/validate
+       policy pair (e.g., mark-unused-services-policy.yaml / validate-unused-services-policy.yaml)
+    7. **Next Steps** — recommended workflow: deploy Kyverno policies → review reports → mark → delete
+
+    Use standard Markdown with tables where appropriate.
+    Always recommend human review before deletion. Never recommend automatic deletion.
+  outputExtraction:
+    type: text
+---
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: WorkflowRun
+metadata:
+  name: resource-cleanup-run-001
+  namespace: ottoflow
+spec:
+  workflowRef:
+    name: resource-cleanup
+  inputValues: {}

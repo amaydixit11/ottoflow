@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # transitive via kubectl-ai/gollm — bump gollm instead once it supports ollama >= 0.20
+      - dependency-name: "github.com/ollama/ollama"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

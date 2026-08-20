@@ -201,39 +201,39 @@ func applyContextBudget(
     }
 }
 
-// applyLastNBudget returns a copy of contextData where the "steps" map only contains
-// entries for the last n steps in completionOrder. Steps not in the last n are removed.
+// applyLastNBudget returns a copy of contextData where the "steps" map only contains entries
+// for the last n *steps that produced an entry in the steps map*. completionOrder is filtered
+// to names present in the steps map BEFORE taking the last n, so a step that completed but
+// wrote no output (no steps entry) does not consume a slot in the window.
 // inputs, variables, and expressions are always preserved unchanged.
 func applyLastNBudget(contextData map[string]interface{}, n int, completionOrder []string) map[string]interface{} {
-    // Compute the set of step names to keep.
-    start := len(completionOrder) - n
+    stepsMap, ok := contextData["steps"].(map[string]interface{})
+    if !ok || len(stepsMap) == 0 {
+        // Nothing to prune; still return a copy with the (empty/absent) steps map.
+        return copyContextWithSteps(contextData, stepsMap)
+    }
+
+    // Filter completionOrder down to names that actually have a steps entry, THEN take last n.
+    present := make([]string, 0, len(completionOrder))
+    for _, name := range completionOrder {
+        if _, exists := stepsMap[name]; exists {
+            present = append(present, name)
+        }
+    }
+    start := len(present) - n
     if start < 0 {
         start = 0
     }
-    keepSet := make(map[string]bool, n)
-    for _, name := range completionOrder[start:] {
+    keepSet := make(map[string]bool, len(present)-start)
+    for _, name := range present[start:] {
         keepSet[name] = true
     }
 
-    // Shallow-copy the top-level context map.
-    filtered := make(map[string]interface{}, len(contextData))
-    for k, v := range contextData {
-        filtered[k] = v
-    }
-
-    // Shallow-copy the steps map, omitting steps not in keepSet.
-    stepsMap, ok := contextData["steps"].(map[string]interface{})
-    if !ok || len(stepsMap) == 0 {
-        return filtered
-    }
     filteredSteps := make(map[string]interface{}, len(keepSet))
-    for name, data := range stepsMap {
-        if keepSet[name] {
-            filteredSteps[name] = data
-        }
+    for name := range keepSet {
+        filteredSteps[name] = stepsMap[name]
     }
-    filtered["steps"] = filteredSteps
-    return filtered
+    return copyContextWithSteps(contextData, filteredSteps)
 }
 
 // applyOmitBudget returns a copy of contextData where the "steps" map is replaced with

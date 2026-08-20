@@ -41,7 +41,12 @@ func truncateAdditionalPrompt(text string, maxTokens int32) (result string, trun
 		return text, false
 	}
 	runes := []rune(text)
-	return string(runes[:tokenBudget]) + "...", true
+	// Reserve room for the marker so the returned string (content + marker) still fits
+	// tokenBudget runes, honouring the documented MaxAdditionalPromptTokens cap.
+	// tokenBudget >= 3 here (maxTokens >= 1), so keep is never negative.
+	const marker = "..."
+	keep := max(tokenBudget-int64(utf8.RuneCountInString(marker)), 0)
+	return string(runes[:keep]) + marker, true
 }
 
 // executeAgentStep executes an agent step

@@ -185,8 +185,10 @@ func applyContextBudget(
 }
 ```
 
-`applyLastNBudget`: shallow-copy top-level map + `steps` map; delete keys for all steps not in
-`completionOrder[max(0, len(completionOrder)-n):]`.
+`applyLastNBudget`: shallow-copy top-level map + `steps` map. First filter `completionOrder` down
+to names that have an entry in the `steps` map (completed steps with no output don't consume a
+window slot), then keep only the last `n` of that filtered order — i.e.
+`present := [name for name in completionOrder if name in steps]; keep present[max(0, len(present)-n):]`.
 
 `applyOmitBudget`: shallow-copy top-level map; replace `steps` with an empty map.
 

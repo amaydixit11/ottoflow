@@ -10,6 +10,9 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
+	"testing"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -470,5 +473,172 @@ var _ = Describe("Agent Step Execution with Mock", func() {
 			Expect(mockExecutor.WasCalledWith("default/agent-1", "Agent 1")).To(BeTrue())
 			Expect(mockExecutor.WasCalledWith("default/agent-2", "Agent 2")).To(BeTrue())
 		})
+
+		// These two tests exercise contextBudget end-to-end through executeAgentStep (not just the
+		// applyContextBudget helper in isolation): they run agent steps whose prompts surface the
+		// filtered `steps` map, then assert the prompt the final agent actually received excludes
+		// pruned step outputs while retaining non-step context (inputs). A regression that removed
+		// or bypassed the budget wiring would fail here even though the unit tests still pass.
+		It("should prune non-recent steps from the agent prompt under contextBudgetMode=lastN", func() {
+			// a -> b -> c chained so completion order is deterministic, then a final step with lastN=2.
+			for _, a := range []struct{ name, prompt string }{
+				{"agent-a", "Agent A base"},
+				{"agent-b", "Agent B base"},
+				{"agent-c", "Agent C base"},
+				{"agent-final", "Final base"},
+			} {
+				Expect(k8sClient.Create(ctx, &ottoflowv1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: a.name, Namespace: "default"},
+					Spec:       ottoflowv1alpha1.AgentSpec{Prompt: a.prompt, ModelProvider: "openai", ModelName: "gpt-4"},
+				})).To(Succeed())
+			}
+
+			lastN := int32(2)
+			workflow := &ottoflowv1alpha1.Workflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
+				Spec: ottoflowv1alpha1.WorkflowSpec{
+					Inputs: []ottoflowv1alpha1.Input{{Name: "tag", Required: true}},
+					Steps: []ottoflowv1alpha1.Step{
+						{Name: "step-a", AgentRef: &ottoflowv1alpha1.StepAgentRef{Name: "agent-a"}},
+						{Name: "step-b", DependsOn: []string{"step-a"}, AgentRef: &ottoflowv1alpha1.StepAgentRef{Name: "agent-b"}},
+						{Name: "step-c", DependsOn: []string{"step-b"}, AgentRef: &ottoflowv1alpha1.StepAgentRef{Name: "agent-c"}},
+						{
+							Name:      "step-final",
+							DependsOn: []string{"step-c"},
+							AgentRef: &ottoflowv1alpha1.StepAgentRef{
+								Name:               "agent-final",
+								ContextBudgetMode:  "lastN",
+								ContextBudgetLastN: &lastN,
+								AdditionalPrompts: []string{
+									`steps`,               // whole (filtered) steps map -> JSON in the prompt
+									`"tag=" + inputs.tag`, // non-step context must survive pruning
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, workflow)).To(Succeed())
+
+			mockExecutor.SetResponse("default/agent-a", "Agent A base", "RESP_A_UNIQUE")
+			mockExecutor.SetResponse("default/agent-b", "Agent B base", "RESP_B_UNIQUE")
+			mockExecutor.SetResponse("default/agent-c", "Agent C base", "RESP_C_UNIQUE")
+			mockExecutor.SetDefaultResponse("final done") // agent-final's prompt is dynamic
+			workflowRun.Spec.InputValues = map[string]string{"tag": "keep-me"}
+
+			Expect(workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)).To(Succeed())
+
+			finalCalls := mockExecutor.GetCallsForAgent("default/agent-final")
+			Expect(finalCalls).To(HaveLen(1))
+			finalPrompt := finalCalls[0].Prompt
+
+			// lastN=2 over completion order [a,b,c] retains b and c, prunes a.
+			Expect(finalPrompt).To(ContainSubstring("RESP_C_UNIQUE"), "most recent step must be retained")
+			Expect(finalPrompt).To(ContainSubstring("RESP_B_UNIQUE"), "second-most-recent step must be retained")
+			Expect(finalPrompt).NotTo(ContainSubstring("RESP_A_UNIQUE"), "pruned step output must not reach the prompt")
+			Expect(finalPrompt).To(ContainSubstring("tag=keep-me"), "non-step context (inputs) must be retained")
+		})
+
+		It("should drop all step outputs but keep non-step context under contextBudgetMode=omit", func() {
+			Expect(k8sClient.Create(ctx, &ottoflowv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "default"},
+				Spec:       ottoflowv1alpha1.AgentSpec{Prompt: "Agent A base", ModelProvider: "openai", ModelName: "gpt-4"},
+			})).To(Succeed())
+			Expect(k8sClient.Create(ctx, &ottoflowv1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-final", Namespace: "default"},
+				Spec:       ottoflowv1alpha1.AgentSpec{Prompt: "Final base", ModelProvider: "openai", ModelName: "gpt-4"},
+			})).To(Succeed())
+
+			workflow := &ottoflowv1alpha1.Workflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
+				Spec: ottoflowv1alpha1.WorkflowSpec{
+					Inputs: []ottoflowv1alpha1.Input{{Name: "tag", Required: true}},
+					Steps: []ottoflowv1alpha1.Step{
+						{Name: "step-a", AgentRef: &ottoflowv1alpha1.StepAgentRef{Name: "agent-a"}},
+						{
+							Name:      "step-final",
+							DependsOn: []string{"step-a"},
+							AgentRef: &ottoflowv1alpha1.StepAgentRef{
+								Name:              "agent-final",
+								ContextBudgetMode: "omit",
+								AdditionalPrompts: []string{
+									`steps`,
+									`"tag=" + inputs.tag`,
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, workflow)).To(Succeed())
+
+			mockExecutor.SetResponse("default/agent-a", "Agent A base", "RESP_A_UNIQUE")
+			mockExecutor.SetDefaultResponse("final done")
+			workflowRun.Spec.InputValues = map[string]string{"tag": "keep-me"}
+
+			Expect(workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)).To(Succeed())
+
+			finalCalls := mockExecutor.GetCallsForAgent("default/agent-final")
+			Expect(finalCalls).To(HaveLen(1))
+			finalPrompt := finalCalls[0].Prompt
+
+			Expect(finalPrompt).NotTo(ContainSubstring("RESP_A_UNIQUE"), "omit must drop all step outputs")
+			Expect(finalPrompt).To(ContainSubstring("tag=keep-me"), "non-step context (inputs) must be retained")
+		})
 	})
 })
+
+// TestTruncateAdditionalPrompt_ExactBoundaryNotTruncated: RuneCount == tokenBudget (maxTokens*3)
+// must NOT truncate. This is the exact boundary the int32-overflow fix depends on getting right.
+func TestTruncateAdditionalPrompt_ExactBoundaryNotTruncated(t *testing.T) {
+	const maxTokens = int32(10)
+	text := strings.Repeat("a", int(maxTokens)*3) // exactly at budget (30 runes)
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if truncated {
+		t.Errorf("expected no truncation when RuneCount == tokenBudget, got truncated=true, result=%q", result)
+	}
+	if result != text {
+		t.Errorf("expected text unchanged at exact boundary, got %q", result)
+	}
+}
+
+// TestTruncateAdditionalPrompt_OneOverBoundaryTruncates is the complementary case: one rune past
+// the budget must truncate, and the returned string (content + marker) must still fit within
+// tokenBudget runes. The marker is reserved inside the budget, not appended on top of a full slice.
+func TestTruncateAdditionalPrompt_OneOverBoundaryTruncates(t *testing.T) {
+	const maxTokens = int32(10)
+	tokenBudget := int(maxTokens) * 3          // 30 runes
+	text := strings.Repeat("a", tokenBudget+1) // one rune past budget
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if !truncated {
+		t.Error("expected truncation when RuneCount > tokenBudget")
+	}
+	// The whole point of the cap: marker included, the result never exceeds the budget.
+	if got := utf8.RuneCountInString(result); got > tokenBudget {
+		t.Errorf("truncated result exceeds budget: got %d runes, want <= %d (result=%q)", got, tokenBudget, result)
+	}
+	want := strings.Repeat("a", tokenBudget-len("...")) + "..."
+	if result != want {
+		t.Errorf("unexpected truncated result: got %q, want %q", result, want)
+	}
+}
+
+// TestTruncateAdditionalPrompt_LargeBudgetNoInt32Overflow guards the int64 math fix: a budget
+// whose *3 would overflow int32 (max ~715,827,882) must not panic and must not wrongly truncate.
+func TestTruncateAdditionalPrompt_LargeBudgetNoInt32Overflow(t *testing.T) {
+	const maxTokens = int32(800_000_000) // maxTokens*3 overflows int32
+	text := "short text"
+
+	result, truncated := truncateAdditionalPrompt(text, maxTokens)
+
+	if truncated {
+		t.Errorf("short text under a huge budget must not be truncated, got %q", result)
+	}
+	if result != text {
+		t.Errorf("expected text unchanged, got %q", result)
+	}
+}

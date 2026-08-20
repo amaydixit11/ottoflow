@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"go.opentelemetry.io/otel"
@@ -25,6 +26,28 @@ import (
 	"github.com/nirmata/ottoflow/internal/agent"
 	"github.com/nirmata/ottoflow/internal/tracing"
 )
+
+// truncateAdditionalPrompt truncates text to fit maxTokens using a rough heuristic of
+// ~3 runes per token (code/YAML tokenizes denser than prose, so this errs conservative).
+// Token math is done in int64 to avoid int32 overflow for large budgets (maxTokens*3 can
+// exceed math.MaxInt32). Returns the text unchanged, with truncated=false, when it already
+// fits the budget — in particular, RuneCount == tokenBudget must NOT truncate.
+func truncateAdditionalPrompt(text string, maxTokens int32) (result string, truncated bool) {
+	if maxTokens <= 0 {
+		return text, false
+	}
+	tokenBudget := int64(maxTokens) * 3
+	if int64(utf8.RuneCountInString(text)) <= tokenBudget {
+		return text, false
+	}
+	runes := []rune(text)
+	// Reserve room for the marker so the returned string (content + marker) still fits
+	// tokenBudget runes, honouring the documented MaxAdditionalPromptTokens cap.
+	// tokenBudget >= 3 here (maxTokens >= 1), so keep is never negative.
+	const marker = "..."
+	keep := max(tokenBudget-int64(utf8.RuneCountInString(marker)), 0)
+	return string(runes[:keep]) + marker, true
+}
 
 // executeAgentStep executes an agent step
 func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ottoflowv1alpha1.WorkflowRun, step ottoflowv1alpha1.Step) (map[string]interface{}, error) {
@@ -88,6 +111,11 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 		return nil, fmt.Errorf("failed to read context: %w", err)
 	}
 
+	// Apply context budget before CEL evaluation (prevents materialization of pruned entries)
+	if agentRef.ContextBudgetMode != "" && agentRef.ContextBudgetMode != "full" {
+		contextData = applyContextBudget(contextData, agentRef, e.contextManager.CompletionOrder())
+	}
+
 	// Build variable map for CEL evaluation
 	vars := e.celEvaluator.BuildVariableMap(contextData)
 
@@ -100,6 +128,12 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 			// Evaluate each additional prompt with workflow context
 			evaluatedPrompt, err := e.celEvaluator.EvaluateExpression(ctx, additionalPromptTemplate, vars)
 			if err != nil {
+				if agentRef.ContextBudgetMode != "" && agentRef.ContextBudgetMode != "full" {
+					return nil, fmt.Errorf(
+						"failed to evaluate additional prompt: %w (step outputs may have been pruned by "+
+							"contextBudgetMode=%s; ensure referenced steps are retained by the configured budget mode)",
+						err, agentRef.ContextBudgetMode)
+				}
 				return nil, fmt.Errorf("failed to evaluate additional prompt: %w", err)
 			}
 			// Convert to string — use JSON for maps/slices so the LLM gets
@@ -108,16 +142,16 @@ func (e *WorkflowExecutor) executeAgentStep(ctx context.Context, workflowRun *ot
 		}
 	}
 
-	// Apply token budget to additional prompts if set (rough heuristic: ~4 runes per token)
+	// Apply token budget to additional prompts if set (~3 runes per token; YAML/code tokenizes denser than prose)
 	var promptStr string
 	if len(promptParts) > 1 && agentRef.MaxAdditionalPromptTokens != nil && *agentRef.MaxAdditionalPromptTokens > 0 {
 		additionalText := strings.Join(promptParts[1:], "\n\n")
-		tokenBudget := *agentRef.MaxAdditionalPromptTokens * 4
-		if int32(utf8.RuneCountInString(additionalText)) > tokenBudget {
-			runes := []rune(additionalText)
-			additionalText = string(runes[:tokenBudget]) + "..."
+		truncatedText, truncated := truncateAdditionalPrompt(additionalText, *agentRef.MaxAdditionalPromptTokens)
+		if truncated {
+			klog.V(2).Infof("additionalPrompts truncated by MaxAdditionalPromptTokens: step=%s budgetTokens=%d",
+				step.Name, *agentRef.MaxAdditionalPromptTokens)
 		}
-		promptStr = promptParts[0] + "\n\n" + additionalText
+		promptStr = promptParts[0] + "\n\n" + truncatedText
 	} else {
 		promptStr = strings.Join(promptParts, "\n\n")
 	}

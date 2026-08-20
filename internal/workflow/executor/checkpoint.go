@@ -41,6 +41,35 @@ type CheckpointSnapshot struct {
 	LastCompletedStep string                                 `json:"lastCompletedStep"`
 	StepStatuses      map[string]ottoflowv1alpha1.StepStatus `json:"stepStatuses"`
 	Context           map[string]interface{}                 `json:"context"`
+	// CompletionOrder is the exact step-completion order recorded during live execution
+	// (ContextManager.CompletionOrder), persisted so ContextBudgetMode=lastN restores the same
+	// lastN window after a restart. CompletionTime has only second granularity, so
+	// reconstructing order from StepStatuses alone can't disambiguate same-second completions —
+	// this field avoids that reconstruction entirely. Omitted (empty) in checkpoints written
+	// before this field existed; loaders must fall back to StepStatuses-based reconstruction
+	// (RestoreCompletionOrder) when it's empty.
+	CompletionOrder []string `json:"completionOrder,omitempty"`
+}
+
+// terminalStepCount returns the number of step statuses that have reached a terminal phase
+// (Succeeded, Failed, or Skipped — matching isStepDone's notion of "done", but counting Failed
+// regardless of FailurePolicy since a Failed status never reverts either way). Pending, Running,
+// and Waiting are excluded: Waiting is a callback-pending state that resolves to a terminal
+// phase later, not a terminal phase itself.
+//
+// Unlike len(StepStatuses) — which ExecuteWorkflow populates for every step up front, before any
+// step completes — this count only grows as steps actually finish, so it can detect that one
+// snapshot represents more progress than another even when both have the same total StepStatuses
+// length (see the comment in SaveAsync).
+func terminalStepCount(statuses map[string]ottoflowv1alpha1.StepStatus) int {
+	count := 0
+	for _, s := range statuses {
+		switch s.Phase {
+		case ottoflowv1alpha1.StepPhaseSucceeded, ottoflowv1alpha1.StepPhaseFailed, ottoflowv1alpha1.StepPhaseSkipped:
+			count++
+		}
+	}
+	return count
 }
 
 // CheckpointManager persists workflow checkpoints to a ConfigMap via async writes.
@@ -177,10 +206,17 @@ func (cm *CheckpointManager) SaveAsync(ctx context.Context, snapshot CheckpointS
 			// Only overwrite if our snapshot is strictly more advanced for the same run.
 			// Prevents older goroutines from downgrading a newer checkpoint.
 			// The UID check guards against a stale ConfigMap left by a prior run with the same name.
+			//
+			// Progress is measured by terminal step count, not len(StepStatuses): ExecuteWorkflow
+			// initializes an entry for every workflow step up front (all Pending) before the first
+			// save, so len(StepStatuses) is constant for the life of the run and would make this
+			// guard trip on the very first comparison, permanently freezing the checkpoint at
+			// whichever snapshot happened to create the ConfigMap. Terminal count strictly
+			// increases with each completed step, so it correctly orders snapshots instead.
 			if existing.Data != nil {
 				var existingSnap CheckpointSnapshot
 				if jsonErr := json.Unmarshal([]byte(existing.Data["checkpoint"]), &existingSnap); jsonErr == nil {
-					if existingSnap.WorkflowRunUID == cm.runUID && len(existingSnap.StepStatuses) >= len(snapshot.StepStatuses) {
+					if existingSnap.WorkflowRunUID == cm.runUID && terminalStepCount(existingSnap.StepStatuses) >= terminalStepCount(snapshot.StepStatuses) {
 						return nil
 					}
 				}

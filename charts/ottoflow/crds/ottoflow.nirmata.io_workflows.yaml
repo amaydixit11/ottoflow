@@ -3495,12 +3495,44 @@ spec:
                           items:
                             type: string
                           type: array
+                        contextBudgetLastN:
+                          description: |-
+                            ContextBudgetLastN is the number of most-recently-completed steps to include when
+                            ContextBudgetMode=lastN. Steps beyond the last N are omitted from CEL context.
+                            N counts only completed steps that have an entry in the context's steps map (e.g. agent
+                            steps that produced a response/output); steps with no steps-map entry are not counted and
+                            do not consume a slot in the window.
+                            Ignored for other modes. Defaults to 5 when omitted or zero.
+                          format: int32
+                          maximum: 1000
+                          minimum: 0
+                          type: integer
+                        contextBudgetMode:
+                          description: |-
+                            ContextBudgetMode controls how much of the accumulated step context is visible to
+                            CEL evaluation when evaluating additionalPrompts. Applied before BuildVariableMap,
+                            so no materialization cost is paid for entries that are filtered out.
+
+                            full: all step outputs are visible (default when omitted — preserves current behavior)
+                            lastN: only the N most recently completed step outputs are visible
+                            omit: no step outputs are visible
+
+                            Only the step outputs are filtered. Inputs, variables, and expressions remain fully
+                            visible in every mode.
+                          enum:
+                          - full
+                          - lastN
+                          - omit
+                          type: string
                         maxAdditionalPromptTokens:
                           description: |-
                             MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
-                            When set, the evaluated additional prompt text is truncated to fit this budget (rough token count).
-                            The agent's base prompt is not counted. Zero or nil means no limit.
+                            When set, the evaluated additional prompt text is truncated to fit this budget, using a rough
+                            heuristic of approximately 3 runes per token (code/YAML tokenizes denser than prose, so this
+                            errs conservative). The agent's base prompt is not counted. Nil means no limit. 0 disables the limit.
                           format: int32
+                          maximum: 10000000
+                          minimum: 0
                           type: integer
                         name:
                           description: Name is the name of the Agent CRD to use
@@ -3675,12 +3707,44 @@ spec:
                                   items:
                                     type: string
                                   type: array
+                                contextBudgetLastN:
+                                  description: |-
+                                    ContextBudgetLastN is the number of most-recently-completed steps to include when
+                                    ContextBudgetMode=lastN. Steps beyond the last N are omitted from CEL context.
+                                    N counts only completed steps that have an entry in the context's steps map (e.g. agent
+                                    steps that produced a response/output); steps with no steps-map entry are not counted and
+                                    do not consume a slot in the window.
+                                    Ignored for other modes. Defaults to 5 when omitted or zero.
+                                  format: int32
+                                  maximum: 1000
+                                  minimum: 0
+                                  type: integer
+                                contextBudgetMode:
+                                  description: |-
+                                    ContextBudgetMode controls how much of the accumulated step context is visible to
+                                    CEL evaluation when evaluating additionalPrompts. Applied before BuildVariableMap,
+                                    so no materialization cost is paid for entries that are filtered out.
+
+                                    full: all step outputs are visible (default when omitted — preserves current behavior)
+                                    lastN: only the N most recently completed step outputs are visible
+                                    omit: no step outputs are visible
+
+                                    Only the step outputs are filtered. Inputs, variables, and expressions remain fully
+                                    visible in every mode.
+                                  enum:
+                                  - full
+                                  - lastN
+                                  - omit
+                                  type: string
                                 maxAdditionalPromptTokens:
                                   description: |-
                                     MaxAdditionalPromptTokens is an optional token budget for the combined additionalPrompts text.
-                                    When set, the evaluated additional prompt text is truncated to fit this budget (rough token count).
-                                    The agent's base prompt is not counted. Zero or nil means no limit.
+                                    When set, the evaluated additional prompt text is truncated to fit this budget, using a rough
+                                    heuristic of approximately 3 runes per token (code/YAML tokenizes denser than prose, so this
+                                    errs conservative). The agent's base prompt is not counted. Nil means no limit. 0 disables the limit.
                                   format: int32
+                                  maximum: 10000000
+                                  minimum: 0
                                   type: integer
                                 name:
                                   description: Name is the name of the Agent CRD to

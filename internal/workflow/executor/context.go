@@ -8,8 +8,10 @@ that can be found in the LICENSE.md file.
 package executor
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
 )
@@ -26,6 +28,7 @@ type ContextManager struct {
 	workflowRun        *ottoflowv1alpha1.WorkflowRun
 	inMemoryContext    map[string]interface{}
 	contextInitialized bool
+	completionOrder    []string // step names in execution-completion order, for ContextBudgetMode=lastN
 }
 
 // NewContextManager creates a new context manager
@@ -154,4 +157,58 @@ func (cm *ContextManager) GetContextFrom(ctx context.Context) map[string]interfa
 func (cm *ContextManager) RestoreContext(snapshot map[string]interface{}) {
 	cm.inMemoryContext = snapshot
 	cm.contextInitialized = true
+}
+
+// RecordStepCompletion appends stepName to the completion order.
+// Called by the executor after each successful executeStep for use by ContextBudgetMode=lastN.
+func (cm *ContextManager) RecordStepCompletion(stepName string) {
+	cm.completionOrder = append(cm.completionOrder, stepName)
+}
+
+// CompletionOrder returns a copy of the recorded step completion sequence, so callers
+// cannot mutate the manager's internal slice.
+func (cm *ContextManager) CompletionOrder() []string {
+	return slices.Clone(cm.completionOrder)
+}
+
+// SetCompletionOrder restores completionOrder directly from a persisted, ordered snapshot
+// (checkpoint.CompletionOrder), giving exact execution order without CompletionTime
+// reconstruction. Use RestoreCompletionOrder as a fallback for older checkpoints saved before
+// completionOrder was persisted.
+func (cm *ContextManager) SetCompletionOrder(order []string) {
+	cm.completionOrder = slices.Clone(order)
+}
+
+// RestoreCompletionOrder rebuilds completionOrder from persisted StepStatuses after a checkpoint
+// restore. Only succeeded steps are included (matching what RecordStepCompletion records during
+// live execution). Steps are sorted by CompletionTime to approximate the original execution order.
+//
+// A succeeded step with no CompletionTime sorts oldest, so it is pruned first by lastN rather
+// than dropped from the order entirely. metav1.Time serializes at second granularity, so equal
+// timestamps are common after a checkpoint round-trip on fast workflows; the name tie-break
+// exists only to make the result deterministic — it does not recover true execution order.
+// A stable sort alone would not help here: the input is a map range, so pre-sort order is random.
+func (cm *ContextManager) RestoreCompletionOrder(statuses map[string]ottoflowv1alpha1.StepStatus) {
+	type entry struct {
+		name string
+		t    int64 // UnixNano; 0 when CompletionTime is nil, so the step sorts oldest
+	}
+	completed := make([]entry, 0, len(statuses))
+	for name, s := range statuses {
+		if s.Phase != ottoflowv1alpha1.StepPhaseSucceeded {
+			continue
+		}
+		var t int64
+		if s.CompletionTime != nil {
+			t = s.CompletionTime.UnixNano()
+		}
+		completed = append(completed, entry{name, t})
+	}
+	slices.SortFunc(completed, func(a, b entry) int {
+		return cmp.Or(cmp.Compare(a.t, b.t), cmp.Compare(a.name, b.name))
+	})
+	cm.completionOrder = make([]string, len(completed))
+	for i, e := range completed {
+		cm.completionOrder[i] = e.name
+	}
 }

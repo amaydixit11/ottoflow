@@ -364,6 +364,94 @@ var _ = Describe("CheckpointManager", func() {
 			Expect(pods["keptCount"]).To(Equal(float64(auditSnapshotMaxArrayEntries)))
 		})
 	})
+
+	Describe("SaveAsync", func() {
+		// Regression test: ExecuteWorkflow initializes a StepStatuses entry for every workflow
+		// step up front (all Pending) before the first checkpoint save ever happens, so
+		// len(StepStatuses) is constant for the entire life of a run. Comparing that total length
+		// (the old guard) therefore ties on the very first comparison after the ConfigMap is
+		// created, and every later save — including the one that should have replaced it — is
+		// silently dropped, permanently freezing the checkpoint (and its CompletionOrder) at
+		// whichever snapshot happened to win the Create. Comparing terminal step count instead
+		// fixes this, since that count strictly increases as steps actually complete.
+		It("replaces an existing checkpoint when terminal step count increases, even though total StepStatuses length stays the same", func() {
+			k8sClient = newFakeClient()
+			mgr := NewCheckpointManager(k8sClient, workflowRun)
+
+			first := CheckpointSnapshot{
+				Version:           1,
+				WorkflowRunUID:    string(workflowRun.UID),
+				LastCompletedStep: "step1",
+				StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+					"step1": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+					"step2": {Phase: ottoflowv1alpha1.StepPhasePending},
+				},
+				CompletionOrder: []string{"step1"},
+			}
+			mgr.SaveAsync(ctx, first)
+			Expect(mgr.Flush(ctx)).To(Succeed())
+
+			// Same total StepStatuses length (2) as "first", but step2 is now terminal too —
+			// this must be recognized as more advanced and must win.
+			second := CheckpointSnapshot{
+				Version:           1,
+				WorkflowRunUID:    string(workflowRun.UID),
+				LastCompletedStep: "step2",
+				StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+					"step1": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+					"step2": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+				},
+				CompletionOrder: []string{"step1", "step2"},
+			}
+			mgr.SaveAsync(ctx, second)
+			Expect(mgr.Flush(ctx)).To(Succeed())
+
+			loaded, err := mgr.Load(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(loaded).NotTo(BeNil())
+			Expect(loaded.LastCompletedStep).To(Equal("step2"))
+			Expect(loaded.CompletionOrder).To(Equal([]string{"step1", "step2"}))
+		})
+
+		It("does not let a lower terminal-count save downgrade a checkpoint that already reflects more progress", func() {
+			k8sClient = newFakeClient()
+			mgr := NewCheckpointManager(k8sClient, workflowRun)
+
+			newer := CheckpointSnapshot{
+				Version:           1,
+				WorkflowRunUID:    string(workflowRun.UID),
+				LastCompletedStep: "step2",
+				StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+					"step1": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+					"step2": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+				},
+				CompletionOrder: []string{"step1", "step2"},
+			}
+			mgr.SaveAsync(ctx, newer)
+			Expect(mgr.Flush(ctx)).To(Succeed())
+
+			// A late-arriving write for an older, less-advanced snapshot (e.g. a delayed retry)
+			// must not overwrite the already-persisted, more-advanced checkpoint.
+			stale := CheckpointSnapshot{
+				Version:           1,
+				WorkflowRunUID:    string(workflowRun.UID),
+				LastCompletedStep: "step1",
+				StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+					"step1": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+					"step2": {Phase: ottoflowv1alpha1.StepPhasePending},
+				},
+				CompletionOrder: []string{"step1"},
+			}
+			mgr.SaveAsync(ctx, stale)
+			Expect(mgr.Flush(ctx)).To(Succeed())
+
+			loaded, err := mgr.Load(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(loaded).NotTo(BeNil())
+			Expect(loaded.LastCompletedStep).To(Equal("step2"))
+			Expect(loaded.CompletionOrder).To(Equal([]string{"step1", "step2"}))
+		})
+	})
 })
 
 var _ = Describe("truncateAuditSnapshot", func() {

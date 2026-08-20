@@ -217,7 +217,7 @@ All paths are under [`samples/workflows/production/`](samples/workflows/producti
 | [`cost-analyzer.yaml`](samples/workflows/production/cost-analyzer.yaml) | Right-sizing from resource specs plus metrics-server/Prometheus P95 usage, per-workload savings. | Markdown report + estimated monthly $ savings. |
 | [`workload-troubleshooter.yaml`](samples/workflows/production/workload-troubleshooter.yaml) | One failing pod: events + logs → LLM root-cause. **⚠ in-cluster only** (needs pod logs; not available in CLI local mode). | Root cause + remediation. |
 
-There are 80+ more workflows in [`samples/`](samples/) covering cost, security, and
+There are 70+ more workflows in [`samples/`](samples/) covering cost, security, and
 compliance automation.
 
 ## Step types
@@ -260,7 +260,7 @@ expressions, so it is a strong check rather than a complete one.
 helm install ottoflow oci://ghcr.io/nirmata/ottoflow \
   --version 0.1.0-rc1 --namespace ottoflow --create-namespace
 
-kubectl apply -R -f samples/
+kubectl apply -f samples/workflows/production/cluster-overview.yaml
 ottoflow run cluster-overview -n ottoflow
 ```
 

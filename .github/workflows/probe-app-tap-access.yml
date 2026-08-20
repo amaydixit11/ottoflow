@@ -1,0 +1,23 @@
+name: probe-app-tap-access
+on: pull_request
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint app token scoped to homebrew-tap
+        id: tap-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.NIRMATA_INTERNAL_APP_ID }}
+          private-key: ${{ secrets.NIRMATA_INTERNAL_PRIVATE_KEY }}
+          owner: nirmata
+          repositories: homebrew-tap
+      - name: Verify tap visibility and write permission (never prints the token)
+        env:
+          T: ${{ steps.tap-token.outputs.token }}
+        run: |
+          echo "── tap access ──"
+          curl -s -H "Authorization: token $T" https://api.github.com/repos/nirmata/homebrew-tap | jq -r 'if .permissions then "visible=yes push=\(.permissions.push)" else "visible=NO (\(.message // "unknown"))" end'
+          echo "── installation identity ──"
+          curl -s -H "Authorization: token $T" https://api.github.com/installation/repositories | jq -r '"repos_in_token_scope: \([.repositories[].full_name] | join(", "))"'

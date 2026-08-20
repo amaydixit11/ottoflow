@@ -107,6 +107,15 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Mint app token for homebrew-tap
+        id: tap-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.NIRMATA_INTERNAL_APP_ID }}
+          private-key: ${{ secrets.NIRMATA_INTERNAL_PRIVATE_KEY }}
+          owner: nirmata
+          repositories: homebrew-tap
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -115,6 +124,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Cross-repo token with write access to nirmata/homebrew-tap,
-          # used by the goreleaser brews section to push the formula.
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          # Cross-repo token for nirmata/homebrew-tap, minted from the
+          # nirmata-internal-app installation (same app as the enterprise
+          # sync workflow); used by the goreleaser brews section to push
+          # the formula. No PAT, no expiry management.
+          TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}

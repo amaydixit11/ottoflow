@@ -24,7 +24,7 @@ constrained to the one step that actually needs judgement. Collection and
 publication stay deterministic; the LLM is spent only on analysis, and it sees
 computed summaries rather than raw cluster objects.
 
-## Why OttoFlow?
+## 🔥 Why OttoFlow?
 
 Kubernetes agentic applications generally follow a predictable pattern. They:
 

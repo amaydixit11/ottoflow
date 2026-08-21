@@ -14,7 +14,7 @@ Sources for this page: [`README.md`](../README.md),
 
 - **Go** — the module targets `go 1.26.0` (`go.mod`). CI resolves its Go
   version from `go.mod` (`.github/workflows/ci.yaml`).
-- **Kubernetes cluster 1.20+** — only needed for in-cluster execution
+- **Kubernetes cluster 1.29+** — only needed for in-cluster execution
   (`README.md`, `DEVELOPER.md`). Local execution needs no cluster.
 - **`kubectl`**, **`make`**, and (for the chart) **Helm v3** — Helm v3.13.0 is
   the version pinned in CI and in the Makefile's tooling (`.github/workflows/ci.yaml`,

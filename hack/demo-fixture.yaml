@@ -1,0 +1,56 @@
+# Demo fixture for `make demo` (applied by hack/gen-demo-gif.sh). Seeds four pods
+# so the recorded pod-triage run shows the agent PRIORITIZING across real, differing
+# signals rather than restating one fact. Two fail differently, two are healthy —
+# giving "4 pods scanned, 2 flagged unhealthy", matching the README transcript:
+#   crashy      — OOMKilled crash-looper: restartCount climbs, lastState OOMKilled
+#   web-broken  — ImagePullBackOff: bad image tag, never starts (0 restarts)
+#   healthy-web — healthy; never flagged (proves the filter excludes healthy pods)
+#   healthy-api — healthy; never flagged
+# Applied to namespace "default" because pod-triage's resourceQuery scans default.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashy
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: crashy
+      image: busybox
+      command: ["sh", "-c", "tail /dev/zero"]   # allocates unbounded memory → OOMKilled
+      resources:
+        limits: {memory: "16Mi"}
+        requests: {memory: "16Mi"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-broken
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: web-broken
+      image: nginx:no-such-tag-9z9z9z          # nonexistent tag → ImagePullBackOff
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: healthy-web
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: healthy-web
+      image: nginx:stable
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: healthy-api
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: healthy-api
+      image: nginx:stable

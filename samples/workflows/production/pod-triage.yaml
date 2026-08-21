@@ -1,6 +1,8 @@
 # Hero example: Collect -> Analyze -> Publish.
-# Collect (resourceQuery, no LLM) gathers pod restart counts, Analyze (agentRef) sends
-# ONLY that summary to a local LLM, Publish is gated by matchConditions on what Collect found.
+# Collect (resourceQuery, no LLM) gathers real per-pod failure signals -- restart counts,
+# what a container is currently waiting on, what it last terminated with -- entirely in CEL.
+# Analyze (agentRef) sends ONLY that computed summary to a local LLM and asks it to
+# prioritize, not narrate. Publish is gated by matchConditions on what Collect found.
 apiVersion: ottoflow.nirmata.io/v1alpha1
 kind: Agent
 metadata:
@@ -8,9 +10,11 @@ metadata:
   namespace: ottoflow
 spec:
   prompt: |
-    You are an SRE triaging pod health. You receive ONLY a cluster snapshot summary
-    (counts and names) -- never raw pod specs. In one sentence, recommend the single
-    highest-priority next action.
+    You are an SRE triaging pod health. You receive ONLY a compact list of per-pod failure
+    signals (restart counts, current waiting reason, last termination reason) -- never raw
+    pod specs or logs. Several pods may be unhealthy for different reasons. Pick the SINGLE
+    highest-priority pod to fix first, say why in one sentence, and give ONE concrete next
+    action.
   modelProvider: local
   # "local" targets a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio).
   # The server address comes from the LLAMACPP_HOST env var, not spec.config:
@@ -25,31 +29,61 @@ metadata:
   namespace: ottoflow
 spec:
   steps:
-    # 1. Collect: list pods and flag high restart counts in CEL. No LLM involved.
+    # 1. Collect: list pods and compute a per-pod failure-signal summary in CEL.
+    #    No LLM involved -- this stays deterministic. A pod is flagged unhealthy if any
+    #    container has restarted more than 3 times, or is currently waiting on a known
+    #    failure reason (CrashLoopBackOff, ImagePullBackOff, ErrImagePull). Every nested
+    #    field read is has()-guarded because containerStatuses[].state/lastState are
+    #    optional oneof-style fields that may not be present yet.
     - name: collectPods
-      message: "Collect pods and flag high restart counts"
+      message: "Collect pods and summarize per-pod failure signals"
       resourceQuery:
         apiVersion: v1
         resource: Pod
         namespace: '"default"'
         outputs:
           totalPods: size(items)
-          highRestartPods: items.filter(i, has(i.status.containerStatuses) &&
-            i.status.containerStatuses.exists(c, int(c.restartCount) > 3)).map(i, i.metadata.name)
-          highRestartCount: size(items.filter(i, has(i.status.containerStatuses) &&
-            i.status.containerStatuses.exists(c, int(c.restartCount) > 3)))
+          # One string per unhealthy pod (restarts > 3, or a container waiting on a
+          # known failure reason). The count of unhealthy pods is just the size of
+          # this list, so it is not computed separately -- see size(podFailureSignals)
+          # in the steps below. Example entries:
+          #   "crashy: 12 restarts, last OOMKilled"
+          #   "web-7f: 4 restarts, waiting ImagePullBackOff"
+          # lastState.terminated.reason takes priority when present: it's the actual cause
+          # (OOMKilled, Error, ...), whereas a waiting reason like CrashLoopBackOff just
+          # describes the retry mechanism, not why the container is crashing. Pods that
+          # never got far enough to terminate (e.g. ImagePullBackOff) have no lastState, so
+          # the waiting reason is the fallback -- and there it IS the root cause.
+          podFailureSignals: |-
+            items.filter(i, has(i.status) && has(i.status.containerStatuses) &&
+              i.status.containerStatuses.exists(c, int(c.restartCount) > 3 ||
+                (has(c.state) && has(c.state.waiting) && has(c.state.waiting.reason) &&
+                  (c.state.waiting.reason == "CrashLoopBackOff" ||
+                   c.state.waiting.reason == "ImagePullBackOff" ||
+                   c.state.waiting.reason == "ErrImagePull")))
+            ).map(i,
+              i.metadata.name + ": " +
+              string(i.status.containerStatuses.map(c, int(c.restartCount)).sum()) + " restarts, " +
+              (i.status.containerStatuses.exists(c, has(c.lastState) && has(c.lastState.terminated) && has(c.lastState.terminated.reason))
+                ? "last " + i.status.containerStatuses.filter(c,
+                    has(c.lastState) && has(c.lastState.terminated) && has(c.lastState.terminated.reason))[0].lastState.terminated.reason
+                : i.status.containerStatuses.exists(c, has(c.state) && has(c.state.waiting) && has(c.state.waiting.reason))
+                  ? "waiting " + i.status.containerStatuses.filter(c,
+                      has(c.state) && has(c.state.waiting) && has(c.state.waiting.reason))[0].state.waiting.reason
+                  : "no waiting/terminated reason reported")
+            )
 
-    # 2. Analyze: hand the agent only the collected summary, never raw pod objects.
+    # 2. Analyze: hand the agent only the computed per-pod signals, never raw pod objects.
     - name: triagePods
-      message: "Ask the agent to triage the flagged pods"
+      message: "Ask the agent to prioritize the unhealthy pods"
       dependsOn:
         - collectPods
       agentRef:
         name: pod-triage-agent
         additionalPrompts:
           - >-
-            format("Cluster snapshot -- total pods: %d, pods with restarts > 3: %d, names: %v.",
-              variables.totalPods, variables.highRestartCount, variables.highRestartPods)
+            format("Cluster snapshot -- %d pods scanned, %d unhealthy. Per-pod failure signals: %v.",
+              variables.totalPods, size(variables.podFailureSignals), variables.podFailureSignals)
       outputs:
         - name: verdict
           expression: agentOutputs.result
@@ -69,8 +103,8 @@ spec:
       outputs:
         - name: summary
           expression: >-
-            format("%d pods scanned, %d flagged for high restarts. Verdict: %s",
-              variables.totalPods, variables.highRestartCount, variables.verdict)
+            format("%d pods scanned, %d flagged unhealthy. Verdict: %s",
+              variables.totalPods, size(variables.podFailureSignals), variables.verdict)
 
   outputs:
     - name: triageSummary

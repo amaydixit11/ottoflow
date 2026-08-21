@@ -4,7 +4,7 @@ This guide walks you through creating your first OttoFlow workflow.
 
 ## Prerequisites
 
-- Kubernetes cluster (1.20+)
+- Kubernetes cluster (1.29+)
 - `kubectl` configured to access your cluster
 - OttoFlow CRDs installed (see [Installation](installation.md))
 

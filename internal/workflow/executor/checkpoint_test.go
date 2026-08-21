@@ -606,11 +606,11 @@ var _ = Describe("ExecuteWorkflow checkpoint restore", func() {
 		utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	})
 
-	buildCheckpointCM := func(ns, wfrName string, snap CheckpointSnapshot) *corev1.ConfigMap {
+	buildCheckpointCM := func(wfrName string, snap CheckpointSnapshot) *corev1.ConfigMap {
 		raw, err := json.Marshal(snap)
 		Expect(err).NotTo(HaveOccurred())
 		return &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: checkpointConfigMapName(wfrName), Namespace: ns},
+			ObjectMeta: metav1.ObjectMeta{Name: checkpointConfigMapName(wfrName), Namespace: "default"},
 			Data:       map[string]string{"checkpoint": string(raw)},
 		}
 	}
@@ -629,7 +629,7 @@ var _ = Describe("ExecuteWorkflow checkpoint restore", func() {
 				"steps":     map[string]interface{}{},
 			},
 		}
-		cm := buildCheckpointCM("default", wfRunName, snapshot)
+		cm := buildCheckpointCM(wfRunName, snapshot)
 		k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 
 		workflowRun := &ottoflowv1alpha1.WorkflowRun{
@@ -687,7 +687,7 @@ var _ = Describe("ExecuteWorkflow checkpoint restore", func() {
 				"steps":     map[string]interface{}{},
 			},
 		}
-		cm := buildCheckpointCM("default", wfRunName, snapshot)
+		cm := buildCheckpointCM(wfRunName, snapshot)
 		k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 
 		workflowRun := &ottoflowv1alpha1.WorkflowRun{
@@ -807,5 +807,85 @@ var _ = Describe("ExecuteWorkflow checkpoint restore", func() {
 		Expect(outputs["apiToken"]).To(Equal(sensitiveRedactedPlaceholder))
 		vars := saved.Context["variables"].(map[string]interface{})
 		Expect(vars["v1"]).To(Equal("public-value"))
+	})
+
+	// These two cases call loadCheckpointIfNeeded directly (unexported, same package) rather
+	// than going through ExecuteWorkflow. They pin down the precondition the controller's
+	// waitForCallback resume fix depends on: setting Status.Phase=Running (with Attempts still
+	// 0, since a callback resume is not a restart-attempt retry) must be sufficient on its own
+	// to trigger a checkpoint restore when the runner Job is recreated after a callback.
+	It("loadCheckpointIfNeeded returns true and restores state when Phase is Running (post-callback resume)", func() {
+		snapshot := CheckpointSnapshot{
+			Version:           1,
+			WorkflowRunUID:    string(wfRunUID),
+			LastCompletedStep: "pre",
+			StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+				"pre": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+			},
+			Context: map[string]interface{}{
+				"inputs":    map[string]interface{}{},
+				"variables": map[string]interface{}{"v1": "restored-running"},
+				"steps":     map[string]interface{}{},
+			},
+		}
+		cm := buildCheckpointCM(wfRunName, snapshot)
+		k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+		workflowRun := &ottoflowv1alpha1.WorkflowRun{
+			ObjectMeta: metav1.ObjectMeta{Name: wfRunName, Namespace: "default", UID: wfRunUID},
+			Spec: ottoflowv1alpha1.WorkflowRunSpec{
+				WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf"},
+				Execution: &ottoflowv1alpha1.WorkflowRunExecutionSpec{
+					Checkpointing: &ottoflowv1alpha1.CheckpointingConfig{Enabled: true},
+				},
+			},
+			// Attempts == 0 (default), but Phase == Running — exactly the state the controller
+			// now persists before recreating the runner Job to resume a waitForCallback step.
+			Status: ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning},
+		}
+
+		exec, err := NewWorkflowExecutorWithMetrics(k8sClient, nil, nil, nil, workflowRun, 0, 5, nil)
+		Expect(err).NotTo(HaveOccurred())
+		exec.SetCheckpointManager(NewCheckpointManager(k8sClient, workflowRun))
+
+		restored, err := exec.loadCheckpointIfNeeded(ctx, workflowRun)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(restored).To(BeTrue())
+		Expect(workflowRun.Status.StepStatuses["pre"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseSucceeded))
+		ctx2, _ := exec.contextManager.ReadContext(ctx)
+		Expect(ctx2["variables"].(map[string]interface{})["v1"]).To(Equal("restored-running"))
+	})
+
+	It("loadCheckpointIfNeeded returns false when Phase is Pending and Attempts is 0, even if a checkpoint exists", func() {
+		snapshot := CheckpointSnapshot{
+			Version:        1,
+			WorkflowRunUID: string(wfRunUID),
+			StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+				"pre": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+			},
+			Context: map[string]interface{}{},
+		}
+		cm := buildCheckpointCM(wfRunName, snapshot)
+		k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+
+		workflowRun := &ottoflowv1alpha1.WorkflowRun{
+			ObjectMeta: metav1.ObjectMeta{Name: wfRunName, Namespace: "default", UID: wfRunUID},
+			Spec: ottoflowv1alpha1.WorkflowRunSpec{
+				WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf"},
+				Execution: &ottoflowv1alpha1.WorkflowRunExecutionSpec{
+					Checkpointing: &ottoflowv1alpha1.CheckpointingConfig{Enabled: true},
+				},
+			},
+			Status: ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhasePending},
+		}
+
+		exec, err := NewWorkflowExecutorWithMetrics(k8sClient, nil, nil, nil, workflowRun, 0, 5, nil)
+		Expect(err).NotTo(HaveOccurred())
+		exec.SetCheckpointManager(NewCheckpointManager(k8sClient, workflowRun))
+
+		restored, err := exec.loadCheckpointIfNeeded(ctx, workflowRun)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(restored).To(BeFalse())
+		Expect(workflowRun.Status.StepStatuses).To(BeEmpty())
 	})
 })

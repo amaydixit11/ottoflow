@@ -4929,7 +4929,7 @@ spec:
                           default: Fail
                           description: |-
                             FailurePolicy determines workflow behavior when the callback timeout is exceeded.
-                            Continue: Proceed to next step (step transitions to Skipped, not Failed)
+                            Continue: proceed to the next step; the gate resumes with empty outputs (not Failed).
                             Fail: Workflow fails (default)
                           enum:
                           - Continue

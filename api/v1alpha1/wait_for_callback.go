@@ -35,7 +35,7 @@ type WaitForCallbackStep struct {
 	Message string `json:"message,omitempty"`
 
 	// FailurePolicy determines workflow behavior when the callback timeout is exceeded.
-	// Continue: Proceed to next step (step transitions to Skipped, not Failed)
+	// Continue: proceed to the next step; the gate resumes with empty outputs (not Failed).
 	// Fail: Workflow fails (default)
 	// +kubebuilder:validation:Enum=Continue;Fail
 	// +kubebuilder:default=Fail

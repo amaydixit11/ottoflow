@@ -2,7 +2,7 @@
 
 #### Prerequisites
 
-- Kubernetes 1.20+
+- Kubernetes 1.29+
 - Helm 3.0+ (for Helm installation)
 
 #### Installing OttoFlow

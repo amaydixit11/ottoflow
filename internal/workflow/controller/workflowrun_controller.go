@@ -1305,25 +1305,24 @@ func (r *WorkflowRunReconciler) reconcilePendingCallback(ctx context.Context, re
 	if now.Unix() > cb.ExpiresAt {
 		failurePolicy := findStepFailurePolicy(workflow, cb.StepName)
 
+		// The event fires unconditionally regardless of failurePolicy; only the log level and
+		// the resulting action differ below.
+		if r.EventRecorder != nil {
+			r.EventRecorder.Eventf(workflowRun, nil, corev1.EventTypeWarning, "CallbackTimeout",
+				"CallbackTimeout", "Callback timeout for step %q", cb.StepName)
+		}
+
 		if failurePolicy == ottoflowv1alpha1.FailurePolicyContinue {
 			// Do NOT clear PendingCallback and do NOT mark the step here: leaving PendingCallback
 			// set is required so resumeRunnerJob recreates the runner Job, whose executor applies
 			// the Continue recovery path on resume (empty outputs → step Succeeded → downstream
 			// steps run). Clearing it here would mean the recreated runner never re-arms.
 			logger.V(1).Info("waitForCallback: token expired, applying Continue; resuming run", "step", cb.StepName)
-			if r.EventRecorder != nil {
-				r.EventRecorder.Eventf(workflowRun, nil, corev1.EventTypeWarning, "CallbackTimeout",
-					"CallbackTimeout", "Callback timeout for step %q", cb.StepName)
-			}
 			return r.resumeRunnerJob(ctx, req, workflow, workflowRun)
 		}
 
 		logger.Info("waitForCallback: token expired, applying failurePolicy Fail",
 			logging.KeyWorkflowRun, req.Name, "step", cb.StepName)
-		if r.EventRecorder != nil {
-			r.EventRecorder.Eventf(workflowRun, nil, corev1.EventTypeWarning, "CallbackTimeout",
-				"CallbackTimeout", "Callback timeout for step %q", cb.StepName)
-		}
 
 		if workflowRun.Status.StepStatuses == nil {
 			workflowRun.Status.StepStatuses = make(map[string]ottoflowv1alpha1.StepStatus)

@@ -982,8 +982,11 @@ func TestWorkflowRunReconciler_Reconcile_WorkflowNotFound_SetsFailed(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wr).Build()
 	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
-	if err == nil {
-		t.Error("expected error when workflow not found")
+	// A NotFound Workflow reference is a terminal condition, not a transient one: retrying
+	// forever would never make the Workflow appear, so Reconcile marks the run Failed and
+	// returns a nil error so controller-runtime does not keep re-queuing a dead run.
+	if err != nil {
+		t.Errorf("expected no error for a terminal NotFound Workflow reference, got: %v", err)
 	}
 	updated := &ottoflowv1alpha1.WorkflowRun{}
 	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); err != nil {
@@ -991,6 +994,51 @@ func TestWorkflowRunReconciler_Reconcile_WorkflowNotFound_SetsFailed(t *testing.
 	}
 	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseFailed {
 		t.Errorf("Phase = %v", updated.Status.Phase)
+	}
+}
+
+// TestWorkflowRunReconciler_Reconcile_WorkflowFetchTransientError_Requeues guards against
+// treating a transient API-server error (not NotFound) the same as an unresolvable Workflow
+// reference. Before this fix, getReferencedWorkflow's caller failed the run unconditionally on
+// any error, so a passing API-server hiccup would permanently kill the WorkflowRun instead of
+// letting controller-runtime retry with backoff.
+func TestWorkflowRunReconciler_Reconcile_WorkflowFetchTransientError_Requeues(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf := &ottoflowv1alpha1.Workflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "wf", Namespace: ns},
+		Spec:       ottoflowv1alpha1.WorkflowSpec{Steps: []ottoflowv1alpha1.Step{{Name: "s1", Expressions: []ottoflowv1alpha1.Expression{{Name: "x", Expression: `"ok"`}}}}},
+	}
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: ns},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf", Namespace: ns}},
+		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhasePending},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr).Build()
+	fakeClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*ottoflowv1alpha1.Workflow); ok {
+				return apierrors.NewServerTimeout(ottoflowv1alpha1.GroupVersion.WithResource("workflows").GroupResource(), "get", 1)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err == nil {
+		t.Fatal("expected a non-nil error so controller-runtime requeues with backoff")
+	}
+	if apierrors.IsNotFound(err) {
+		t.Fatalf("expected a transient error, got NotFound: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Errorf("a transient fetch error must not fail the run; Phase = %v", updated.Status.Phase)
 	}
 }
 

@@ -153,11 +153,15 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 
 	workflow, workflowNamespace, err := r.getReferencedWorkflow(ctx, workflowRun)
 	if err != nil {
-		logger.Error(err, "failed to get Workflow", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
-		setRunFailed(workflowRun, err.Error())
-		if err := r.Status().Update(ctx, workflowRun); err != nil {
-			return ctrl.Result{}, err
+		if apierrors.IsNotFound(err) {
+			logger.Error(err, "referenced Workflow not found; failing run", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
+			setRunFailed(workflowRun, err.Error())
+			if err := r.Status().Update(ctx, workflowRun); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
 		}
+		logger.Error(err, "failed to resolve referenced Workflow; requeuing", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
 		return ctrl.Result{}, err
 	}
 	// workflow is used below for checkpointing config and run policy
@@ -340,7 +344,7 @@ func (r *WorkflowRunReconciler) getReferencedWorkflow(ctx context.Context, workf
 		}
 	}
 
-	return nil, "", fmt.Errorf("failed to get Workflow %s: %v", workflowKey, err)
+	return nil, "", fmt.Errorf("failed to get Workflow %s: %w", workflowKey, err)
 }
 
 func workflowRunnerJobName(runName string) string {

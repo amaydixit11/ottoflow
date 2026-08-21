@@ -639,8 +639,11 @@ var _ = Describe("WorkflowRun Controller", func() {
 			reconciler := &WorkflowRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerConfig: RunnerConfig{RunnerClusterRole: "ottoflow-runner-role"}}
 
 			By("reconcile fails to resolve the Workflow and marks the run Failed")
+			// A NotFound Workflow reference is a terminal condition, not a transient one: the
+			// reconciler marks the run Failed and returns a nil error so controller-runtime does
+			// not keep re-queuing a run that can never succeed.
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
 			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseFailed))

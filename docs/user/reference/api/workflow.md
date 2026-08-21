@@ -262,7 +262,7 @@ Pauses workflow execution at this step and waits for an external callback before
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `waitForCallback.timeout` | string | **Yes** | Maximum wait duration (e.g. `"24h"`, `"30m"`). Step fails/skips at expiry depending on `failurePolicy`. |
+| `waitForCallback.timeout` | string | **Yes** | Maximum wait duration (e.g. `"24h"`, `"30m"`). Behavior at expiry depends on `failurePolicy` (below): the step fails, or resumes with empty outputs. |
 | `waitForCallback.callbackRef` | string | No | Human-readable label for the callback (used in logs and events). |
 | `waitForCallback.message` | string | No | Message shown in logs when the step pauses; can include instructions for the callback caller. |
 | `waitForCallback.outputSchema` | JSON Schema object | No | JSON Schema for callback payload validation. Required fields are enforced; missing required fields return 400. If absent, all payloads are accepted. |

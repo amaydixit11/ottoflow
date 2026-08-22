@@ -145,6 +145,15 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Terminal-phase check: only after token verification, so a caller with the wrong token
+	// can't use this response to probe whether a run has reached a terminal phase. A run can be
+	// marked terminal (e.g. cron Replace cancellation) while a PendingCallback is still live;
+	// once terminal it must never accept a callback that can no longer be consumed.
+	if runIsTerminal(wr) {
+		writeTerminalCallbackError(w)
+		return
+	}
+
 	// Expiry check
 	if time.Now().Unix() > cb.ExpiresAt {
 		writeCallbackError(w, "callback token expired", http.StatusUnauthorized)
@@ -203,11 +212,18 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 		cb.TokenHash, cb.StepName, cb.ExpiresAt, cb.CreatedAt, string(outputsJSONBytes))
 
 	conflictDetected := false
+	terminalDetected := false
 	patchErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Re-fetch to get latest resourceVersion for optimistic concurrency
 		fresh := &ottoflowv1alpha1.WorkflowRun{}
 		if err := cs.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, fresh); err != nil {
 			return err
+		}
+		// Safety: the run may have been marked terminal (e.g. cron Replace cancellation)
+		// between the admission check above and this re-fetch.
+		if runIsTerminal(fresh) {
+			terminalDetected = true
+			return nil
 		}
 		// Safety: another callback may have already written outputs
 		if fresh.Status.PendingCallback != nil && len(fresh.Status.PendingCallback.Outputs.Raw) > 0 {
@@ -216,6 +232,11 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 		}
 		return cs.client.Status().Patch(ctx, fresh, client.RawPatch(types.MergePatchType, []byte(patchStr)))
 	})
+
+	if terminalDetected {
+		writeTerminalCallbackError(w)
+		return
+	}
 
 	if conflictDetected {
 		// Another concurrent callback already set outputs — idempotent accept
@@ -363,4 +384,17 @@ func writeCallbackError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// runIsTerminal reports whether wr has reached a terminal phase (Succeeded or Failed), at which
+// point it must never accept a callback that can no longer be consumed.
+func runIsTerminal(wr *ottoflowv1alpha1.WorkflowRun) bool {
+	return wr.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseSucceeded || wr.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed
+}
+
+// writeTerminalCallbackError writes the 410 Gone response for a callback rejected because the
+// WorkflowRun has reached a terminal phase. Shared by the admission check and the retry-loop
+// re-check so both surfaces stay in sync.
+func writeTerminalCallbackError(w http.ResponseWriter) {
+	writeCallbackError(w, "workflow run has reached a terminal phase; no longer accepting callbacks", http.StatusGone)
 }

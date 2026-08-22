@@ -263,7 +263,18 @@ func TestScheduler_CancelActiveWorkflowRuns(t *testing.T) {
 	wr := &ottoflowv1alpha1.WorkflowRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: ns},
 		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf", Namespace: ns}},
-		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning},
+		Status: ottoflowv1alpha1.WorkflowRunStatus{
+			Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning,
+			// A live pending callback on the run being replaced: Fix 2b requires the
+			// cancellation path to clear this (via setRunFailed) so a Failed run never keeps
+			// accepting callbacks it can no longer consume.
+			PendingCallback: &ottoflowv1alpha1.CallbackState{
+				TokenHash: "irrelevant-for-this-test",
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			},
+		},
 	}
 	wr.Labels = map[string]string{"ottoflow.nirmata.io/workflow": "wf", "ottoflow.nirmata.io/trigger": "cron"}
 	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr).Build()
@@ -280,6 +291,9 @@ func TestScheduler_CancelActiveWorkflowRuns(t *testing.T) {
 	}
 	if updated.Status.Message == "" || !strings.Contains(updated.Status.Message, "Replaced") {
 		t.Errorf("Message %q should contain Replaced", updated.Status.Message)
+	}
+	if updated.Status.PendingCallback != nil {
+		t.Errorf("PendingCallback = %+v, want nil after cancellation", updated.Status.PendingCallback)
 	}
 }
 

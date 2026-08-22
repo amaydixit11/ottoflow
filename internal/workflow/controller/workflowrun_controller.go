@@ -341,6 +341,10 @@ func (r *WorkflowRunReconciler) getReferencedWorkflow(ctx context.Context, workf
 			klog.Warningf("Workflow %s not found; falling back to controller namespace %q. The upstream caller should set workflowRef.namespace=%q to make this lookup explicit.",
 				workflowKey, r.ControllerNamespace, r.ControllerNamespace)
 			return fallback, r.ControllerNamespace, nil
+		} else if !apierrors.IsNotFound(fbErr) {
+			// Transient fallback error (e.g. API server timeout): the caller must requeue, not
+			// terminally fail the run on what would otherwise be treated as a NotFound.
+			return nil, "", fmt.Errorf("failed to get Workflow %s in controller namespace %q: %w", fallbackKey, r.ControllerNamespace, fbErr)
 		}
 	}
 
@@ -1363,14 +1367,14 @@ func (r *WorkflowRunReconciler) resumeRunnerJob(ctx context.Context, req ctrl.Re
 		stepName = cb.StepName
 	}
 
-	ensureRunning := func() (ctrl.Result, bool, error) {
+	ensureRunning := func() error {
 		if workflowRun.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
 			workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseRunning
 			if uErr := r.Status().Update(ctx, workflowRun); uErr != nil {
-				return ctrl.Result{}, false, uErr
+				return uErr
 			}
 		}
-		return ctrl.Result{}, true, nil
+		return nil
 	}
 
 	jobName := workflowRunnerJobName(workflowRun.Name)
@@ -1380,7 +1384,10 @@ func (r *WorkflowRunReconciler) resumeRunnerJob(ctx context.Context, req ctrl.Re
 	switch {
 	case apierrors.IsNotFound(err):
 		// Old paused Job gone (or none) — ready to resume.
-		return ensureRunning() // proceed → fall through to the creation block
+		if err := ensureRunning(); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		return ctrl.Result{}, true, nil // proceed → fall through to the creation block
 	case err != nil:
 		return ctrl.Result{}, false, err
 	case jobConditionTrue(job, batchv1.JobComplete) || job.Status.Succeeded > 0:
@@ -1404,8 +1411,15 @@ func (r *WorkflowRunReconciler) resumeRunnerJob(ctx context.Context, req ctrl.Re
 		res, _, hfErr := r.handleFailedJob(ctx, workflowRun, workflow, job, jobName)
 		return res, false, hfErr
 	default:
-		// Job exists and is still active ⇒ resume already in progress. Monitor.
-		return ensureRunning()
+		// Job exists and is still active ⇒ resume already in progress. Do NOT proceed: falling
+		// through to the normal Job-creation block would hit its crude job.Status.Failed>0 check
+		// instead of the JobFailed-*condition* gate above, so monitoring stays here where that
+		// gate is authoritative for backoffLimit>0 (a transient first-pod failure sets Failed>0
+		// with no JobFailed condition yet).
+		if err := ensureRunning(); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
 	}
 }
 

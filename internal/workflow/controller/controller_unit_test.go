@@ -2107,6 +2107,49 @@ func TestGetReferencedWorkflow_PrimaryLookupSucceeds(t *testing.T) {
 	}
 }
 
+// TestWorkflowRunReconciler_Reconcile_FallbackWorkflowFetchTransientError_Requeues is the
+// regression test for Fix 3 (issue #33): the primary Workflow lookup is a genuine NotFound, and
+// the ControllerNamespace fallback lookup fails with a transient (non-NotFound) API error. Before
+// the fix, getReferencedWorkflow discarded the fallback error and always returned the wrapped
+// primary NotFound, so the caller's apierrors.IsNotFound check terminally failed the run instead
+// of requeuing on what was really just a passing API-server hiccup on the fallback Get.
+func TestWorkflowRunReconciler_Reconcile_FallbackWorkflowFetchTransientError_Requeues(t *testing.T) {
+	ctx := context.Background()
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: "agents"},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "cost-analyzer", Namespace: "ottoflow"}},
+		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhasePending},
+	}
+	// No Workflow exists anywhere: the primary Get (namespace "ottoflow") is a real NotFound.
+	baseClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wr).Build()
+	fakeClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*ottoflowv1alpha1.Workflow); ok && key.Namespace == "ottoflow-alt" {
+				// The fallback Get (in ControllerNamespace) hits a transient API-server error.
+				return apierrors.NewServerTimeout(ottoflowv1alpha1.GroupVersion.WithResource("workflows").GroupResource(), "get", 1)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme, ControllerNamespace: "ottoflow-alt"}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: "agents"}})
+	if err == nil {
+		t.Fatal("expected a non-nil error so controller-runtime requeues with backoff")
+	}
+	if apierrors.IsNotFound(err) {
+		t.Fatalf("expected a transient error, got NotFound: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Errorf("a transient fallback fetch error must not fail the run; Phase = %v", updated.Status.Phase)
+	}
+}
+
 // --- reconcilePendingCallback (waitForCallback timeout / resume) tests ---
 
 // buildCallbackWorkflowAndRun builds a minimal Workflow with a single waitForCallback step named
@@ -2366,6 +2409,60 @@ func TestReconcilePendingCallback_OutputsDelivered_NoOldJob_CreatesRunnerJob(t *
 	job := &batchv1.Job{}
 	if getErr := fakeClient.Get(ctx, types.NamespacedName{Name: workflowRunnerJobName(wr.Name), Namespace: ns}, job); getErr != nil {
 		t.Fatalf("expected runner Job to be created, got: %v", getErr)
+	}
+}
+
+// TestReconcilePendingCallback_ActiveResumeJobFailedNoCondition_StaysMonitoring is the regression
+// test for Fix 1: a recreated resume Job with backoffLimit>0 can report Status.Failed>0 for an
+// in-flight pod retry well before Kubernetes sets the terminal JobFailed *condition*. Before the
+// fix, resumeRunnerJob's active-Job branch returned proceed=true unconditionally, so the caller
+// fell through to the normal Job-creation block's crude `job.Status.Failed>0` check, which
+// terminally failed the run (or restarted it) on what was actually just a transient pod failure —
+// defeating the JobFailed-condition gate in resumeRunnerJob's own JobFailed case. The fix keeps
+// monitoring inside the pending-callback path instead of falling through.
+func TestReconcilePendingCallback_ActiveResumeJobFailedNoCondition_StaysMonitoring(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-active-resume", "run-active-resume", ottoflowv1alpha1.FailurePolicyFail)
+	// Not expired, and outputs already delivered: the outputs-present branch routes straight into
+	// resumeRunnerJob regardless of expiry or failurePolicy.
+	wr.Status.PendingCallback.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+	wr.Status.PendingCallback.Outputs = apiextensionsv1.JSON{Raw: []byte(`{"approved":true}`)}
+
+	// The recreated resume Job already exists, is active, and has one failed pod (an in-flight
+	// backoffLimit>0 retry) but NO JobFailed condition yet.
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: workflowRunnerJobName(wr.Name), Namespace: ns},
+		Spec:       batchv1.JobSpec{BackoffLimit: ptr.To(int32(3))},
+		Status:     batchv1.JobStatus{Active: 1, Failed: 1},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, job).Build()
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.RequeueAfter != 2*time.Second {
+		t.Errorf("RequeueAfter = %v, want 2s", result.RequeueAfter)
+	}
+
+	updatedJob := &batchv1.Job{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(job), updatedJob); getErr != nil {
+		t.Fatalf("expected resume Job to still exist (not deleted), got: %v", getErr)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+		t.Errorf("Phase = %v, want Running", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback == nil {
+		t.Error("expected PendingCallback to be retained while monitoring the active resume Job")
 	}
 }
 

@@ -9,6 +9,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
@@ -238,6 +240,77 @@ func TestCallbackServer_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid JSON, got %d", w.Code)
+	}
+}
+
+// TestCallbackServer_TerminalPhase_ValidToken_ReturnsGone is the regression test for Fix 2a: a
+// WorkflowRun can be marked terminal (e.g. by the cron Replace cancellation path) while its
+// PendingCallback is still live. Before the fix, handleCallback admitted the callback purely on
+// token + expiry and never looked at Status.Phase, so a Failed run kept a dead callback endpoint
+// that still returned 200 and patched outputs nothing would ever consume.
+func TestCallbackServer_TerminalPhase_ValidToken_ReturnsGone(t *testing.T) {
+	scheme := newCallbackTestScheme()
+	tok := validTestToken()
+	wr := newWRWithPendingCallback("run-terminal", tok, 1*time.Hour)
+	wr.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(wr).
+		WithObjects(wr).
+		Build()
+
+	cs := NewCallbackServer(k8s, nil, ":0")
+
+	path := fmt.Sprintf("/api/v1/workflow-runs/default/run-terminal/callback/%s", tok)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"approved":true}`))
+	w := httptest.NewRecorder()
+
+	cs.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusGone {
+		t.Fatalf("expected 410 for terminal-phase run, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if err := k8s.Get(context.Background(), client.ObjectKeyFromObject(wr), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.PendingCallback != nil && len(updated.Status.PendingCallback.Outputs.Raw) > 0 {
+		t.Error("outputs must not be patched onto a terminal-phase run")
+	}
+}
+
+// TestCallbackServer_TerminalPhase_WrongToken_ReturnsUnauthorized confirms the security ordering
+// in Fix 2a: the terminal-phase check runs AFTER token verification, so an unauthenticated caller
+// with the wrong token cannot use the response code to probe whether a run has reached a terminal
+// phase — they still get the same 401 an active run would return.
+func TestCallbackServer_TerminalPhase_WrongToken_ReturnsUnauthorized(t *testing.T) {
+	scheme := newCallbackTestScheme()
+	tok := validTestToken()
+	wr := newWRWithPendingCallback("run-terminal-wrong-token", tok, 1*time.Hour)
+	wr.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(wr).
+		WithObjects(wr).
+		Build()
+
+	cs := NewCallbackServer(k8s, nil, ":0")
+
+	wrongToken := "cb_" + strings.Repeat("b2c3d4e5", 8)
+	path := fmt.Sprintf("/api/v1/workflow-runs/default/run-terminal-wrong-token/callback/%s", wrongToken)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"approved":true}`))
+	w := httptest.NewRecorder()
+
+	cs.mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusGone {
+		t.Fatalf("wrong token on a terminal-phase run must not return 410 (would leak terminal state to an unauthenticated caller), got %d", w.Code)
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong token, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

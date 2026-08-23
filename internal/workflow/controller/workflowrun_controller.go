@@ -153,12 +153,15 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 
 	workflow, workflowNamespace, err := r.getReferencedWorkflow(ctx, workflowRun)
 	if err != nil {
-		logger.Error(err, "failed to get Workflow", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
-		workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-		workflowRun.Status.Message = err.Error()
-		if err := r.Status().Update(ctx, workflowRun); err != nil {
-			return ctrl.Result{}, err
+		if apierrors.IsNotFound(err) {
+			logger.Error(err, "referenced Workflow not found; failing run", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
+			setRunFailed(workflowRun, err.Error())
+			if err := r.Status().Update(ctx, workflowRun); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
 		}
+		logger.Error(err, "failed to resolve referenced Workflow; requeuing", logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
 		return ctrl.Result{}, err
 	}
 	// workflow is used below for checkpointing config and run policy
@@ -166,7 +169,12 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 	// --- waitForCallback handling ---
 	// If a callback is pending, handle timeout or wait for callback/timeout.
 	if workflowRun.Status.PendingCallback != nil {
-		return r.reconcilePendingCallback(ctx, req, workflowRun)
+		res, proceed, err := r.reconcilePendingCallback(ctx, req, workflow, workflowRun)
+		if err != nil || !proceed {
+			return res, err
+		}
+		// proceed == true: resume — fall through to the normal Job-creation block below,
+		// with PendingCallback still set so the executor consumes the outputs.
 	}
 
 	jobName := workflowRunnerJobName(workflowRun.Name)
@@ -193,8 +201,7 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 				return ctrl.Result{}, te.err
 			}
 			logger.Error(err, "failed to build runner Job", logging.KeyWorkflow, workflowRun.Spec.WorkflowRef.Name, logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
-			workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-			workflowRun.Status.Message = fmt.Sprintf("Failed to build runner Job: %v", err)
+			setRunFailed(workflowRun, fmt.Sprintf("Failed to build runner Job: %v", err))
 			if err := r.Status().Update(ctx, workflowRun); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -206,8 +213,7 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
 			logger.Error(err, "failed to ensure runner service account access", logging.KeyWorkflow, workflowRun.Spec.WorkflowRef.Name, logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
-			workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-			workflowRun.Status.Message = fmt.Sprintf("Failed to prepare runner access: %v", err)
+			setRunFailed(workflowRun, fmt.Sprintf("Failed to prepare runner access: %v", err))
 			if err := r.Status().Update(ctx, workflowRun); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -216,8 +222,7 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 		sourceNamespace := runnerSecretSourceNamespace(r.RunnerConfig, workflowNamespace)
 		if err := r.ensureRunnerSecrets(ctx, workflowRun, createdJob, sourceNamespace); err != nil {
 			logger.Error(err, "failed to ensure runner secrets", logging.KeyWorkflow, workflowRun.Spec.WorkflowRef.Name, logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace)
-			workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-			workflowRun.Status.Message = fmt.Sprintf("Failed to prepare runner secrets: %v", err)
+			setRunFailed(workflowRun, fmt.Sprintf("Failed to prepare runner secrets: %v", err))
 			if err := r.Status().Update(ctx, workflowRun); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -232,8 +237,7 @@ func (r *WorkflowRunReconciler) reconcileJobExecution(ctx context.Context, req c
 				}
 			} else {
 				logger.Error(err, "failed to create runner Job", logging.KeyWorkflow, workflowRun.Spec.WorkflowRef.Name, logging.KeyWorkflowRun, req.Name, logging.KeyNamespace, req.Namespace, "job", jobKey)
-				workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-				workflowRun.Status.Message = fmt.Sprintf("Failed to create runner Job %s: %v", jobName, err)
+				setRunFailed(workflowRun, fmt.Sprintf("Failed to create runner Job %s: %v", jobName, err))
 				if err := r.Status().Update(ctx, workflowRun); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -337,10 +341,14 @@ func (r *WorkflowRunReconciler) getReferencedWorkflow(ctx context.Context, workf
 			klog.Warningf("Workflow %s not found; falling back to controller namespace %q. The upstream caller should set workflowRef.namespace=%q to make this lookup explicit.",
 				workflowKey, r.ControllerNamespace, r.ControllerNamespace)
 			return fallback, r.ControllerNamespace, nil
+		} else if !apierrors.IsNotFound(fbErr) {
+			// Transient fallback error (e.g. API server timeout): the caller must requeue, not
+			// terminally fail the run on what would otherwise be treated as a NotFound.
+			return nil, "", fmt.Errorf("failed to get Workflow %s in controller namespace %q: %w", fallbackKey, r.ControllerNamespace, fbErr)
 		}
 	}
 
-	return nil, "", fmt.Errorf("failed to get Workflow %s: %v", workflowKey, err)
+	return nil, "", fmt.Errorf("failed to get Workflow %s: %w", workflowKey, err)
 }
 
 func workflowRunnerJobName(runName string) string {
@@ -356,6 +364,16 @@ func workflowRunnerJobName(runName string) string {
 	suffix := fmt.Sprintf("%08x", h.Sum64())
 	prefix := strings.TrimSuffix(base[:63-len(suffix)-1], "-") // reserve "-" + suffix
 	return prefix + "-" + suffix
+}
+
+// jobConditionTrue reports whether the Job has a condition of the given type set to True.
+func jobConditionTrue(job *batchv1.Job, t batchv1.JobConditionType) bool {
+	for _, c := range job.Status.Conditions {
+		if c.Type == t && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // RunnerClusterRole is required and validated non-empty at startup (cmd/controller/main.go); no safe default.
@@ -1174,6 +1192,21 @@ func (r *WorkflowRunReconciler) handleFailedJob(ctx context.Context, workflowRun
 	return r.markRunTerminallyFailed(ctx, workflowRun, jobName, terminationReason, attempts)
 }
 
+// setRunFailed transitions a WorkflowRun to the terminal Failed phase with the given message and
+// always clears any pending callback. This enforces the invariant that a run in phase Failed never
+// keeps a live callback endpoint: the HTTP callback server admits a POST based only on
+// Status.PendingCallback (token + expiry) and never checks Status.Phase, so a Failed run that still
+// carried a PendingCallback would keep accepting callbacks that can never be consumed (a dead run
+// whose endpoint still returns 200). Every terminal Failed transition must go through this helper.
+// It deliberately does NOT touch Execution, CompletionTime, or step statuses — call sites set those
+// as needed. It must NOT be used on the transient-retry path (retryTransientFailure), which keeps
+// PendingCallback so the recreated runner can consume the delivered callback outputs.
+func setRunFailed(workflowRun *ottoflowv1alpha1.WorkflowRun, message string) {
+	workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
+	workflowRun.Status.Message = message
+	workflowRun.Status.PendingCallback = nil
+}
+
 // markRunTerminallyFailed marks a WorkflowRun as Failed and cleans up the checkpoint ConfigMap.
 func (r *WorkflowRunReconciler) markRunTerminallyFailed(ctx context.Context, workflowRun *ottoflowv1alpha1.WorkflowRun, jobName, terminationReason string, attempts int32) (ctrl.Result, bool, error) {
 	now := metav1.Now()
@@ -1186,9 +1219,8 @@ func (r *WorkflowRunReconciler) markRunTerminallyFailed(ctx context.Context, wor
 	default:
 		msg = fmt.Sprintf("Runner Job %s failed", jobName)
 	}
-	workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
+	setRunFailed(workflowRun, msg)
 	workflowRun.Status.CompletionTime = &now
-	workflowRun.Status.Message = msg
 	if workflowRun.Status.Execution == nil {
 		workflowRun.Status.Execution = &ottoflowv1alpha1.WorkflowRunExecutionStatus{}
 	}
@@ -1252,78 +1284,63 @@ func warnCheckpointForEach(ctx context.Context, workflow *ottoflowv1alpha1.Workf
 }
 
 // reconcilePendingCallback handles the WaitForCallback case:
-//   - If the token has expired, apply failurePolicy (mark step Failed/Skipped, fail/continue workflow).
+//   - If the token has expired, apply failurePolicy: Fail marks the step Failed and fails the
+//     run; Continue leaves the step's callback armed and recreates the runner Job so the executor
+//     resumes it with empty outputs.
 //   - If outputs have been set by the callback handler, recreate the runner Job so it can resume.
 //   - Otherwise requeue to re-check at expiry time.
-func (r *WorkflowRunReconciler) reconcilePendingCallback(ctx context.Context, req ctrl.Request, workflowRun *ottoflowv1alpha1.WorkflowRun) (ctrl.Result, error) {
+//
+// Returns (result, proceed, err): when proceed is true, the caller falls through to the normal
+// Job-creation block instead of returning immediately. This is what lets a resumed run's runner
+// Job actually get (re)created — previously this function never fell through, so once
+// PendingCallback was set, every reconcile was permanently routed here and no Job was ever
+// created after the old one was deleted (nirmata/ottoflow#18).
+func (r *WorkflowRunReconciler) reconcilePendingCallback(ctx context.Context, req ctrl.Request, workflow *ottoflowv1alpha1.Workflow, workflowRun *ottoflowv1alpha1.WorkflowRun) (ctrl.Result, bool, error) {
 	logger := log.FromContext(ctx)
 	cb := workflowRun.Status.PendingCallback
 	now := time.Now()
 
 	// Check outputs FIRST: a callback arriving just before expiry must not be lost by a racing timeout check.
 	if len(cb.Outputs.Raw) > 0 {
-		logger.Info("waitForCallback: callback received, recreating runner Job to resume",
-			logging.KeyWorkflowRun, req.Name, "step", cb.StepName)
-		// Fall through to normal job creation by clearing PendingCallback from in-memory view
-		// (the executor will read it from the real status and pick up outputs)
-		// We need to delete the old completed job first if it exists
-		jobName := workflowRunnerJobName(workflowRun.Name)
-		job := &batchv1.Job{}
-		jobKey := types.NamespacedName{Name: jobName, Namespace: workflowRun.Namespace}
-		if err := r.Get(ctx, jobKey, job); err == nil {
-			// Delete old completed job (foreground: blocks until pods are gone, preventing AlreadyExists on recreate)
-			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to delete old runner Job for callback resume")
-				return ctrl.Result{}, err
-			}
-			// Foreground deletion is not instantaneous — re-check before proceeding
-			existing := &batchv1.Job{}
-			if err := r.Get(ctx, jobKey, existing); err == nil {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-		}
-		// Job is gone — next reconcile (PendingCallback still has outputs) will create a fresh Job
-		return ctrl.Result{Requeue: true}, nil
+		return r.resumeRunnerJob(ctx, req, workflow, workflowRun)
 	}
 
 	// Emit CallbackTimeout event and apply failurePolicy
 	if now.Unix() > cb.ExpiresAt {
-		logger.Info("waitForCallback: token expired, applying failurePolicy",
-			logging.KeyWorkflowRun, req.Name, "step", cb.StepName)
+		failurePolicy := findStepFailurePolicy(workflow, cb.StepName)
 
-		failurePolicy := r.findStepFailurePolicy(ctx, workflowRun, cb.StepName)
-
+		// The event fires unconditionally regardless of failurePolicy; only the log level and
+		// the resulting action differ below.
 		if r.EventRecorder != nil {
 			r.EventRecorder.Eventf(workflowRun, nil, corev1.EventTypeWarning, "CallbackTimeout",
 				"CallbackTimeout", "Callback timeout for step %q", cb.StepName)
 		}
 
+		if failurePolicy == ottoflowv1alpha1.FailurePolicyContinue {
+			// Do NOT clear PendingCallback and do NOT mark the step here: leaving PendingCallback
+			// set is required so resumeRunnerJob recreates the runner Job, whose executor applies
+			// the Continue recovery path on resume (empty outputs → step Succeeded → downstream
+			// steps run). Clearing it here would mean the recreated runner never re-arms.
+			logger.V(1).Info("waitForCallback: token expired, applying Continue; resuming run", "step", cb.StepName)
+			return r.resumeRunnerJob(ctx, req, workflow, workflowRun)
+		}
+
+		logger.Info("waitForCallback: token expired, applying failurePolicy Fail",
+			logging.KeyWorkflowRun, req.Name, "step", cb.StepName)
+
 		if workflowRun.Status.StepStatuses == nil {
 			workflowRun.Status.StepStatuses = make(map[string]ottoflowv1alpha1.StepStatus)
 		}
 		ss := workflowRun.Status.StepStatuses[cb.StepName]
-		workflowRun.Status.PendingCallback = nil
-
-		if failurePolicy == ottoflowv1alpha1.FailurePolicyContinue {
-			ss.Phase = ottoflowv1alpha1.StepPhaseSkipped
-			ss.Message = "Callback timed out; step skipped (failurePolicy: Continue)"
-			workflowRun.Status.StepStatuses[cb.StepName] = ss
-			if err := r.Status().Update(ctx, workflowRun); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{Requeue: true}, nil
-		}
-
 		ss.Phase = ottoflowv1alpha1.StepPhaseFailed
 		ss.Error = "callback timeout: no callback received within the configured timeout"
 		ss.Message = ss.Error
 		workflowRun.Status.StepStatuses[cb.StepName] = ss
-		workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
-		workflowRun.Status.Message = fmt.Sprintf("Step %q timed out waiting for callback", cb.StepName)
+		setRunFailed(workflowRun, fmt.Sprintf("Step %q timed out waiting for callback", cb.StepName))
 		if err := r.Status().Update(ctx, workflowRun); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, false, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, false, nil
 	}
 
 	// Still waiting: requeue at expiry time
@@ -1334,25 +1351,90 @@ func (r *WorkflowRunReconciler) reconcilePendingCallback(ctx context.Context, re
 	logger.V(1).Info("waitForCallback: still waiting for callback",
 		logging.KeyWorkflowRun, req.Name, "step", cb.StepName,
 		"requeueIn", requeueIn)
-	return ctrl.Result{RequeueAfter: requeueIn + time.Second}, nil
+	return ctrl.Result{RequeueAfter: requeueIn + time.Second}, false, nil
 }
 
-// findStepFailurePolicy looks up the failurePolicy for a step by name in the referenced Workflow.
-// Returns FailurePolicyFail if the step is not found or has no policy set.
-func (r *WorkflowRunReconciler) findStepFailurePolicy(ctx context.Context, workflowRun *ottoflowv1alpha1.WorkflowRun, stepName string) string {
-	wfNamespace := workflowRun.Spec.WorkflowRef.Namespace
-	if wfNamespace == "" {
-		wfNamespace = workflowRun.Namespace
+// resumeRunnerJob recreates (or waits out) the runner Job so a paused WorkflowRun can resume after
+// a callback was delivered or a Continue failurePolicy applied on timeout. Both outcomes converge
+// on the same action: mark the run Running (so the recreated runner restores from checkpoint via
+// loadCheckpointIfNeeded instead of re-running completed steps) and proceed to Job creation.
+// PendingCallback is intentionally left set for the executor to consume.
+func (r *WorkflowRunReconciler) resumeRunnerJob(ctx context.Context, req ctrl.Request, workflow *ottoflowv1alpha1.Workflow, workflowRun *ottoflowv1alpha1.WorkflowRun) (ctrl.Result, bool, error) {
+	logger := log.FromContext(ctx)
+	cb := workflowRun.Status.PendingCallback
+	stepName := ""
+	if cb != nil {
+		stepName = cb.StepName
 	}
-	wf := &ottoflowv1alpha1.Workflow{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: wfNamespace, Name: workflowRun.Spec.WorkflowRef.Name}, wf); err != nil {
+
+	ensureRunning := func() error {
+		if workflowRun.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+			workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseRunning
+			if uErr := r.Status().Update(ctx, workflowRun); uErr != nil {
+				return uErr
+			}
+		}
+		return nil
+	}
+
+	jobName := workflowRunnerJobName(workflowRun.Name)
+	jobKey := types.NamespacedName{Name: jobName, Namespace: workflowRun.Namespace}
+	job := &batchv1.Job{}
+	err := r.Get(ctx, jobKey, job)
+	switch {
+	case apierrors.IsNotFound(err):
+		// Old paused Job gone (or none) — ready to resume.
+		if err := ensureRunning(); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		return ctrl.Result{}, true, nil // proceed → fall through to the creation block
+	case err != nil:
+		return ctrl.Result{}, false, err
+	case jobConditionTrue(job, batchv1.JobComplete) || job.Status.Succeeded > 0:
+		// Old paused runner Job exited 0 (Complete). Delete so we can recreate the same name.
+		// Checked before the failure case: a Job that succeeded after an earlier pod retry
+		// (backoffLimit>0) reports both Complete and Failed>0, and "completed" must win.
+		logger.Info("waitForCallback: recreating runner Job to resume",
+			logging.KeyWorkflowRun, req.Name, "step", stepName)
+		if job.DeletionTimestamp == nil {
+			if dErr := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground)); dErr != nil && !apierrors.IsNotFound(dErr) {
+				logger.Error(dErr, "failed to delete old runner Job for callback resume")
+				return ctrl.Result{}, false, dErr
+			}
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	case jobConditionTrue(job, batchv1.JobFailed):
+		// A recreated resume Job terminally failed (backoffLimit exhausted). Gated on the
+		// JobFailed *condition*, not job.Status.Failed>0, so an in-flight retry is not misread
+		// as terminal failure. Route through the standard failure path (attempt cap + terminal
+		// fail) to avoid a hot delete/recreate loop.
+		res, _, hfErr := r.handleFailedJob(ctx, workflowRun, workflow, job, jobName)
+		return res, false, hfErr
+	default:
+		// Job exists and is still active ⇒ resume already in progress. Do NOT proceed: falling
+		// through to the normal Job-creation block would hit its crude job.Status.Failed>0 check
+		// instead of the JobFailed-*condition* gate above, so monitoring stays here where that
+		// gate is authoritative for backoffLimit>0 (a transient first-pod failure sets Failed>0
+		// with no JobFailed condition yet).
+		if err := ensureRunning(); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+}
+
+// findStepFailurePolicy looks up the failurePolicy for a step by name in the given Workflow.
+// Pure in-memory lookup: takes the already-resolved Workflow instead of re-fetching it, so it
+// respects whatever namespace resolution (including the ControllerNamespace fallback) the caller
+// used to obtain it. Returns FailurePolicyFail if workflow is nil, the step is not found, or the
+// step has no policy set.
+func findStepFailurePolicy(workflow *ottoflowv1alpha1.Workflow, stepName string) string {
+	if workflow == nil {
 		return ottoflowv1alpha1.FailurePolicyFail
 	}
-	for _, step := range wf.Spec.Steps {
-		if step.Name == stepName && step.WaitForCallback != nil {
-			if step.WaitForCallback.FailurePolicy != "" {
-				return step.WaitForCallback.FailurePolicy
-			}
+	for _, step := range workflow.Spec.Steps {
+		if step.Name == stepName && step.WaitForCallback != nil && step.WaitForCallback.FailurePolicy != "" {
+			return step.WaitForCallback.FailurePolicy
 		}
 	}
 	return ottoflowv1alpha1.FailurePolicyFail

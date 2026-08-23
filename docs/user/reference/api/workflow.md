@@ -262,11 +262,11 @@ Pauses workflow execution at this step and waits for an external callback before
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `waitForCallback.timeout` | string | **Yes** | Maximum wait duration (e.g. `"24h"`, `"30m"`). Step fails/skips at expiry depending on `failurePolicy`. |
+| `waitForCallback.timeout` | string | **Yes** | Maximum wait duration (e.g. `"24h"`, `"30m"`). Behavior at expiry depends on `failurePolicy` (below): the step fails, or resumes with empty outputs. |
 | `waitForCallback.callbackRef` | string | No | Human-readable label for the callback (used in logs and events). |
 | `waitForCallback.message` | string | No | Message shown in logs when the step pauses; can include instructions for the callback caller. |
 | `waitForCallback.outputSchema` | JSON Schema object | No | JSON Schema for callback payload validation. Required fields are enforced; missing required fields return 400. If absent, all payloads are accepted. |
-| `waitForCallback.failurePolicy` | `Fail` \| `Continue` | No | Behavior on timeout. `Fail` (default): workflow fails. `Continue`: step transitions to Skipped with empty outputs; workflow continues. |
+| `waitForCallback.failurePolicy` | `Fail` \| `Continue` | No | Behavior on timeout. `Fail` (default): workflow fails. `Continue`: on timeout the gate resumes with empty outputs and the workflow proceeds to downstream steps. |
 
 **Callback endpoint:**
 ```
@@ -310,6 +310,7 @@ steps.awaitApproval.outputs.reviewer    # "alice@example.com"
 **Constraints:**
 - Only one `waitForCallback` can be active at a time per WorkflowRun (single `pendingCallback` slot).
 - `waitForCallback` inside `forEach` is rejected at admission.
+- Safe resume across a pause requires `WorkflowRun.spec.execution.checkpointing.enabled: true`; without it, steps that ran before the gate re-execute on resume (their outputs are not preserved).
 - Token is single-use; a second callback for the same token after outputs are set returns `200 already_accepted`.
 
 **Example:**

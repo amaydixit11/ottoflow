@@ -8,7 +8,13 @@ that can be found in the LICENSE.md file.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -16,6 +22,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,6 +36,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
+	"github.com/nirmata/ottoflow/internal/workflow/executor"
+	"github.com/nirmata/ottoflow/internal/workflow/token"
 )
 
 const defaultNamespace = "default"
@@ -274,6 +283,371 @@ var _ = Describe("WorkflowRun Controller", func() {
 			Expect(wr.Status.Execution).NotTo(BeNil())
 			Expect(wr.Status.Execution.JobName).To(Equal("restart-fail-run-runner"))
 			Expect(wr.Status.Execution.Phase).To(Equal(string(ottoflowv1alpha1.WorkflowRunPhaseFailed)))
+		})
+	})
+
+	Context("waitForCallback resume", func() {
+		// This Context uses the real envtest API server (the shared package-level k8sClient),
+		// not the fake client, because the regression being guarded against only reproduces
+		// against real API-server Job status/finalizer semantics (see forceDeleteJob below).
+		ctx := context.Background()
+		ns := defaultNamespace
+
+		// checkpointCMNameForTest mirrors executor.checkpointConfigMapName (unexported) for
+		// the short, hyphen-only run names used in these tests, where no truncation or hash
+		// suffix is ever applied.
+		checkpointCMNameForTest := func(runName string) string {
+			return "ottoflow-cp-" + strings.ToLower(runName)
+		}
+
+		// forceDeleteJob works around envtest's lack of a garbage-collector controller. A
+		// foreground-propagation Delete sets a deletionTimestamp plus a "foregroundDeletion"
+		// finalizer that only a running GC controller would normally remove once dependent
+		// Pods are gone. Stripping the finalizer here simulates that cleanup completing so
+		// the object is actually removed and the run can be recreated under the same name.
+		forceDeleteJob := func(key types.NamespacedName) {
+			job := &batchv1.Job{}
+			if err := k8sClient.Get(ctx, key, job); err != nil {
+				Expect(errors.IsNotFound(err)).To(BeTrue())
+				return
+			}
+			if len(job.Finalizers) > 0 {
+				job.Finalizers = nil
+				Expect(k8sClient.Update(ctx, job)).To(Succeed())
+			}
+			if err := k8sClient.Get(ctx, key, job); err == nil {
+				if dErr := k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); dErr != nil && !errors.IsNotFound(dErr) {
+					GinkgoWriter.Printf("forceDeleteJob: delete error for %s: %v\n", key, dErr)
+				}
+			}
+			Eventually(func() bool {
+				getErr := k8sClient.Get(ctx, key, &batchv1.Job{})
+				if getErr != nil && !errors.IsNotFound(getErr) {
+					GinkgoWriter.Printf("forceDeleteJob: get error for %s: %v\n", key, getErr)
+				}
+				return errors.IsNotFound(getErr)
+			}, "5s", "100ms").Should(BeTrue())
+		}
+
+		buildWorkflowAndRun := func(wfName, runName string) (*ottoflowv1alpha1.Workflow, *ottoflowv1alpha1.WorkflowRun) {
+			workflow := &ottoflowv1alpha1.Workflow{
+				ObjectMeta: metav1.ObjectMeta{Name: wfName, Namespace: ns},
+				Spec: ottoflowv1alpha1.WorkflowSpec{
+					Steps: []ottoflowv1alpha1.Step{
+						{
+							Name:    "pre",
+							Outputs: []ottoflowv1alpha1.Output{{Name: "preResult", Expression: `"pre-done"`}},
+						},
+						{
+							Name:      "gate",
+							DependsOn: []string{"pre"},
+							WaitForCallback: &ottoflowv1alpha1.WaitForCallbackStep{
+								Timeout: "1h",
+								OutputSchema: &apiextensionsv1.JSON{
+									Raw: []byte(`{"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}}`),
+								},
+							},
+						},
+					},
+				},
+			}
+			wr := &ottoflowv1alpha1.WorkflowRun{
+				ObjectMeta: metav1.ObjectMeta{Name: runName, Namespace: ns},
+				Spec: ottoflowv1alpha1.WorkflowRunSpec{
+					WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: wfName, Namespace: ns},
+					Execution: &ottoflowv1alpha1.WorkflowRunExecutionSpec{
+						Checkpointing: &ottoflowv1alpha1.CheckpointingConfig{Enabled: true},
+					},
+				},
+			}
+			return workflow, wr
+		}
+
+		// writeCheckpoint persists a checkpoint ConfigMap in exactly the shape checkpoint.go
+		// expects, recording "pre" as already succeeded so a resumed runner would restore it
+		// instead of re-running it. WorkflowRunUID must match the created run's UID or Load
+		// treats it as a stale checkpoint and returns nil.
+		writeCheckpoint := func(runName string, runUID types.UID) {
+			snapshot := executor.CheckpointSnapshot{
+				Version:           1,
+				WorkflowRunUID:    string(runUID),
+				LastCompletedStep: "pre",
+				StepStatuses: map[string]ottoflowv1alpha1.StepStatus{
+					"pre": {Phase: ottoflowv1alpha1.StepPhaseSucceeded},
+				},
+				Context: map[string]interface{}{
+					"inputs":    map[string]interface{}{},
+					"variables": map[string]interface{}{"preResult": "pre-done"},
+					"steps":     map[string]interface{}{},
+				},
+			}
+			raw, err := json.Marshal(snapshot)
+			Expect(err).NotTo(HaveOccurred())
+			cmObj := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: checkpointCMNameForTest(runName), Namespace: ns},
+				Data:       map[string]string{"checkpoint": string(raw)},
+			}
+			Expect(k8sClient.Create(ctx, cmObj)).To(Succeed())
+		}
+
+		// markJobComplete simulates the paused runner Job having exited 0 (waitForCallback
+		// steps exit clean and wait for the controller to recreate the Job on resume).
+		markJobComplete := func(jobKey types.NamespacedName) {
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
+			now := metav1.Now()
+			job.Status.Conditions = []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+			}
+			job.Status.Succeeded = 1
+			job.Status.StartTime = &now
+			job.Status.CompletionTime = &now
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+		}
+
+		cleanupAll := func(wfName, runName string) {
+			jobKey := types.NamespacedName{Name: workflowRunnerJobName(runName), Namespace: ns}
+			if err := k8sClient.Get(ctx, jobKey, &batchv1.Job{}); err == nil {
+				forceDeleteJob(jobKey)
+			}
+			_ = k8sClient.Delete(ctx, &ottoflowv1alpha1.WorkflowRun{ObjectMeta: metav1.ObjectMeta{Name: runName, Namespace: ns}})
+			_ = k8sClient.Delete(ctx, &ottoflowv1alpha1.Workflow{ObjectMeta: metav1.ObjectMeta{Name: wfName, Namespace: ns}})
+			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: checkpointCMNameForTest(runName), Namespace: ns}})
+		}
+
+		It("recreates the runner Job and preserves PendingCallback when outputs are delivered by a direct status update", func() {
+			wfName, runName := "cb-resume-wf-a", "cb-resume-run-a"
+			defer cleanupAll(wfName, runName)
+
+			workflow, wr := buildWorkflowAndRun(wfName, runName)
+			Expect(k8sClient.Create(ctx, workflow)).To(Succeed())
+			Expect(k8sClient.Create(ctx, wr)).To(Succeed())
+
+			wrKey := types.NamespacedName{Name: runName, Namespace: ns}
+			jobKey := types.NamespacedName{Name: workflowRunnerJobName(runName), Namespace: ns}
+			reconciler := &WorkflowRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerConfig: RunnerConfig{RunnerClusterRole: "ottoflow-runner-role"}}
+
+			By("initial reconcile creates the runner Job")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhasePending))
+			Expect(k8sClient.Get(ctx, jobKey, &batchv1.Job{})).To(Succeed())
+
+			By("simulating the pause: pending callback set, checkpoint written, old Job completed")
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback = &ottoflowv1alpha1.CallbackState{
+				TokenHash: token.HashToken(validTestToken()),
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+			writeCheckpoint(runName, wr.UID)
+			markJobComplete(jobKey)
+
+			By("delivering the callback outputs via a direct status update")
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback.Outputs = apiextensionsv1.JSON{Raw: []byte(`{"approved":true}`)}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+
+			By("reconcile deletes the old (completed) runner Job and requeues")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+
+			job := &batchv1.Job{}
+			getErr := k8sClient.Get(ctx, jobKey, job)
+			if getErr == nil {
+				Expect(job.DeletionTimestamp).NotTo(BeNil())
+			} else {
+				Expect(errors.IsNotFound(getErr)).To(BeTrue())
+			}
+
+			By("simulating garbage collection of the deleted Job (envtest has no GC controller)")
+			forceDeleteJob(jobKey)
+
+			By("reconcile recreates the runner Job and preserves PendingCallback for the executor to consume")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, jobKey, &batchv1.Job{})).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseRunning))
+			Expect(wr.Status.PendingCallback).NotTo(BeNil())
+			Expect(wr.Status.PendingCallback.Outputs.Raw).NotTo(BeEmpty())
+
+			By("further reconciles converge: Job stays present, Phase stays Running, no repeated deletes")
+			for i := 0; i < 3; i++ {
+				_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, jobKey, &batchv1.Job{})).To(Succeed())
+				Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+				Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseRunning))
+			}
+		})
+
+		It("recreates the runner Job when outputs are delivered via the HTTP callback server", func() {
+			wfName, runName := "cb-resume-wf-b", "cb-resume-run-b"
+			defer cleanupAll(wfName, runName)
+
+			workflow, wr := buildWorkflowAndRun(wfName, runName)
+			Expect(k8sClient.Create(ctx, workflow)).To(Succeed())
+			Expect(k8sClient.Create(ctx, wr)).To(Succeed())
+
+			wrKey := types.NamespacedName{Name: runName, Namespace: ns}
+			jobKey := types.NamespacedName{Name: workflowRunnerJobName(runName), Namespace: ns}
+			reconciler := &WorkflowRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerConfig: RunnerConfig{RunnerClusterRole: "ottoflow-runner-role"}}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			tok := validTestToken()
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback = &ottoflowv1alpha1.CallbackState{
+				TokenHash: token.HashToken(tok),
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+			writeCheckpoint(runName, wr.UID)
+			markJobComplete(jobKey)
+
+			By("delivering the callback outputs via the HTTP callback server")
+			cs := NewCallbackServer(k8sClient, nil, ":0")
+			path := fmt.Sprintf("/api/v1/workflow-runs/%s/%s/callback/%s", ns, runName, tok)
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"approved":true}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			cs.mux.ServeHTTP(w, req)
+			Expect(w.Code).To(Equal(http.StatusOK))
+
+			By("reconcile deletes the old (completed) runner Job and requeues")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+
+			forceDeleteJob(jobKey)
+
+			By("reconcile recreates the runner Job and preserves PendingCallback for the executor to consume")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, jobKey, &batchv1.Job{})).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseRunning))
+			Expect(wr.Status.PendingCallback).NotTo(BeNil())
+			Expect(wr.Status.PendingCallback.Outputs.Raw).NotTo(BeEmpty())
+		})
+
+		It("terminally fails a resume run without leaving PendingCallback set when the recreated Job fails", func() {
+			wfName, runName := "cb-resume-wf-c", "cb-resume-run-c"
+			defer cleanupAll(wfName, runName)
+
+			workflow, wr := buildWorkflowAndRun(wfName, runName)
+			zeroRetries := int32(0)
+			wr.Spec.Execution.Checkpointing.MaxRestartAttempts = &zeroRetries
+			Expect(k8sClient.Create(ctx, workflow)).To(Succeed())
+			Expect(k8sClient.Create(ctx, wr)).To(Succeed())
+
+			wrKey := types.NamespacedName{Name: runName, Namespace: ns}
+			jobKey := types.NamespacedName{Name: workflowRunnerJobName(runName), Namespace: ns}
+			reconciler := &WorkflowRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerConfig: RunnerConfig{RunnerClusterRole: "ottoflow-runner-role"}}
+
+			By("initial reconcile creates the runner Job")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("simulating the pause: pending callback set, checkpoint written, old Job completed")
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback = &ottoflowv1alpha1.CallbackState{
+				TokenHash: token.HashToken(validTestToken()),
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+			writeCheckpoint(runName, wr.UID)
+			markJobComplete(jobKey)
+
+			By("delivering the callback outputs via a direct status update")
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback.Outputs = apiextensionsv1.JSON{Raw: []byte(`{"approved":true}`)}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+
+			By("reconcile deletes the old (completed) runner Job and requeues")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			forceDeleteJob(jobKey)
+
+			By("reconcile recreates the runner Job and preserves PendingCallback for the executor to consume")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseRunning))
+			Expect(wr.Status.PendingCallback).NotTo(BeNil())
+
+			By("the recreated resume Job terminally fails (backoffLimit exhausted)")
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
+			now := metav1.Now()
+			job.Status.StartTime = &now
+			job.Status.Failed = 1
+			job.Status.Conditions = []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			By("reconcile routes the failed resume Job through the terminal-failure path")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseFailed))
+			Expect(wr.Status.PendingCallback).To(BeNil())
+		})
+
+		It("clears PendingCallback when the referenced Workflow cannot be resolved", func() {
+			wfName, runName := "cb-resolve-fail-wf", "cb-resolve-fail-run"
+			defer cleanupAll(wfName, runName)
+
+			// Deliberately do NOT create the Workflow so getReferencedWorkflow fails. This
+			// exercises the pre-gate failure path in reconcileJobExecution: a run carrying a live
+			// pending callback whose Workflow has been deleted must be marked Failed WITHOUT
+			// leaving a stale PendingCallback, or its callback endpoint would keep accepting POSTs
+			// for a dead run (the callback server never checks Phase).
+			wr := &ottoflowv1alpha1.WorkflowRun{
+				ObjectMeta: metav1.ObjectMeta{Name: runName, Namespace: ns},
+				Spec: ottoflowv1alpha1.WorkflowRunSpec{
+					WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: wfName, Namespace: ns},
+				},
+			}
+			Expect(k8sClient.Create(ctx, wr)).To(Succeed())
+
+			wrKey := types.NamespacedName{Name: runName, Namespace: ns}
+			By("setting a live pending callback on the run")
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			wr.Status.PendingCallback = &ottoflowv1alpha1.CallbackState{
+				TokenHash: token.HashToken(validTestToken()),
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			}
+			Expect(k8sClient.Status().Update(ctx, wr)).To(Succeed())
+
+			reconciler := &WorkflowRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerConfig: RunnerConfig{RunnerClusterRole: "ottoflow-runner-role"}}
+
+			By("reconcile fails to resolve the Workflow and marks the run Failed")
+			// A NotFound Workflow reference is a terminal condition, not a transient one: the
+			// reconciler marks the run Failed and returns a nil error so controller-runtime does
+			// not keep re-queuing a run that can never succeed.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wrKey})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, wrKey, wr)).To(Succeed())
+			Expect(wr.Status.Phase).To(Equal(ottoflowv1alpha1.WorkflowRunPhaseFailed))
+			Expect(wr.Status.PendingCallback).To(BeNil())
 		})
 	})
 

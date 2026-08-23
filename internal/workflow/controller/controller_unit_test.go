@@ -23,6 +23,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -262,7 +263,18 @@ func TestScheduler_CancelActiveWorkflowRuns(t *testing.T) {
 	wr := &ottoflowv1alpha1.WorkflowRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: ns},
 		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf", Namespace: ns}},
-		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning},
+		Status: ottoflowv1alpha1.WorkflowRunStatus{
+			Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning,
+			// A live pending callback on the run being replaced: Fix 2b requires the
+			// cancellation path to clear this (via setRunFailed) so a Failed run never keeps
+			// accepting callbacks it can no longer consume.
+			PendingCallback: &ottoflowv1alpha1.CallbackState{
+				TokenHash: "irrelevant-for-this-test",
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Unix(),
+			},
+		},
 	}
 	wr.Labels = map[string]string{"ottoflow.nirmata.io/workflow": "wf", "ottoflow.nirmata.io/trigger": "cron"}
 	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr).Build()
@@ -279,6 +291,9 @@ func TestScheduler_CancelActiveWorkflowRuns(t *testing.T) {
 	}
 	if updated.Status.Message == "" || !strings.Contains(updated.Status.Message, "Replaced") {
 		t.Errorf("Message %q should contain Replaced", updated.Status.Message)
+	}
+	if updated.Status.PendingCallback != nil {
+		t.Errorf("PendingCallback = %+v, want nil after cancellation", updated.Status.PendingCallback)
 	}
 }
 
@@ -982,8 +997,11 @@ func TestWorkflowRunReconciler_Reconcile_WorkflowNotFound_SetsFailed(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wr).Build()
 	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
-	if err == nil {
-		t.Error("expected error when workflow not found")
+	// A NotFound Workflow reference is a terminal condition, not a transient one: retrying
+	// forever would never make the Workflow appear, so Reconcile marks the run Failed and
+	// returns a nil error so controller-runtime does not keep re-queuing a dead run.
+	if err != nil {
+		t.Errorf("expected no error for a terminal NotFound Workflow reference, got: %v", err)
 	}
 	updated := &ottoflowv1alpha1.WorkflowRun{}
 	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); err != nil {
@@ -991,6 +1009,51 @@ func TestWorkflowRunReconciler_Reconcile_WorkflowNotFound_SetsFailed(t *testing.
 	}
 	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseFailed {
 		t.Errorf("Phase = %v", updated.Status.Phase)
+	}
+}
+
+// TestWorkflowRunReconciler_Reconcile_WorkflowFetchTransientError_Requeues guards against
+// treating a transient API-server error (not NotFound) the same as an unresolvable Workflow
+// reference. Before this fix, getReferencedWorkflow's caller failed the run unconditionally on
+// any error, so a passing API-server hiccup would permanently kill the WorkflowRun instead of
+// letting controller-runtime retry with backoff.
+func TestWorkflowRunReconciler_Reconcile_WorkflowFetchTransientError_Requeues(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf := &ottoflowv1alpha1.Workflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "wf", Namespace: ns},
+		Spec:       ottoflowv1alpha1.WorkflowSpec{Steps: []ottoflowv1alpha1.Step{{Name: "s1", Expressions: []ottoflowv1alpha1.Expression{{Name: "x", Expression: `"ok"`}}}}},
+	}
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: ns},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf", Namespace: ns}},
+		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhasePending},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr).Build()
+	fakeClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*ottoflowv1alpha1.Workflow); ok {
+				return apierrors.NewServerTimeout(ottoflowv1alpha1.GroupVersion.WithResource("workflows").GroupResource(), "get", 1)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err == nil {
+		t.Fatal("expected a non-nil error so controller-runtime requeues with backoff")
+	}
+	if apierrors.IsNotFound(err) {
+		t.Fatalf("expected a transient error, got NotFound: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Errorf("a transient fetch error must not fail the run; Phase = %v", updated.Status.Phase)
 	}
 }
 
@@ -2055,6 +2118,365 @@ func TestGetReferencedWorkflow_PrimaryLookupSucceeds(t *testing.T) {
 	}
 	if gotNs != "ottoflow" {
 		t.Errorf("expected resolved namespace ottoflow (primary), got %q", gotNs)
+	}
+}
+
+// TestWorkflowRunReconciler_Reconcile_FallbackWorkflowFetchTransientError_Requeues is the
+// regression test for Fix 3 (issue #33): the primary Workflow lookup is a genuine NotFound, and
+// the ControllerNamespace fallback lookup fails with a transient (non-NotFound) API error. Before
+// the fix, getReferencedWorkflow discarded the fallback error and always returned the wrapped
+// primary NotFound, so the caller's apierrors.IsNotFound check terminally failed the run instead
+// of requeuing on what was really just a passing API-server hiccup on the fallback Get.
+func TestWorkflowRunReconciler_Reconcile_FallbackWorkflowFetchTransientError_Requeues(t *testing.T) {
+	ctx := context.Background()
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: "agents"},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "cost-analyzer", Namespace: "ottoflow"}},
+		Status:     ottoflowv1alpha1.WorkflowRunStatus{Phase: ottoflowv1alpha1.WorkflowRunPhasePending},
+	}
+	// No Workflow exists anywhere: the primary Get (namespace "ottoflow") is a real NotFound.
+	baseClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wr).Build()
+	fakeClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*ottoflowv1alpha1.Workflow); ok && key.Namespace == "ottoflow-alt" {
+				// The fallback Get (in ControllerNamespace) hits a transient API-server error.
+				return apierrors.NewServerTimeout(ottoflowv1alpha1.GroupVersion.WithResource("workflows").GroupResource(), "get", 1)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme, ControllerNamespace: "ottoflow-alt"}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: "agents"}})
+	if err == nil {
+		t.Fatal("expected a non-nil error so controller-runtime requeues with backoff")
+	}
+	if apierrors.IsNotFound(err) {
+		t.Fatalf("expected a transient error, got NotFound: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Errorf("a transient fallback fetch error must not fail the run; Phase = %v", updated.Status.Phase)
+	}
+}
+
+// --- reconcilePendingCallback (waitForCallback timeout / resume) tests ---
+
+// buildCallbackWorkflowAndRun builds a minimal Workflow with a single waitForCallback step named
+// "gate" and a WorkflowRun already parked on that step with an EXPIRED PendingCallback, ready to
+// exercise the timeout branch of reconcilePendingCallback via a plain Reconcile call.
+func buildCallbackWorkflowAndRun(wfName, runName, failurePolicy string) (*ottoflowv1alpha1.Workflow, *ottoflowv1alpha1.WorkflowRun) {
+	ns := defaultNamespace
+	wf := &ottoflowv1alpha1.Workflow{
+		ObjectMeta: metav1.ObjectMeta{Name: wfName, Namespace: ns},
+		Spec: ottoflowv1alpha1.WorkflowSpec{
+			Steps: []ottoflowv1alpha1.Step{
+				{
+					Name: "gate",
+					WaitForCallback: &ottoflowv1alpha1.WaitForCallbackStep{
+						Timeout:       "1h",
+						FailurePolicy: failurePolicy,
+					},
+				},
+			},
+		},
+	}
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: runName, Namespace: ns},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: wfName, Namespace: ns}},
+		Status: ottoflowv1alpha1.WorkflowRunStatus{
+			Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning,
+			PendingCallback: &ottoflowv1alpha1.CallbackState{
+				TokenHash: "irrelevant-for-these-tests",
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(-1 * time.Hour).Unix(), // already expired
+				CreatedAt: time.Now().Add(-2 * time.Hour).Unix(),
+			},
+		},
+	}
+	return wf, wr
+}
+
+// TestReconcilePendingCallback_TimeoutContinue_RecreatesRunnerJob is the Fix-1 regression test:
+// before this fix, a Continue failurePolicy on timeout cleared PendingCallback and marked the
+// step Skipped without ever recreating the runner Job, so the run went permanently idle. Continue
+// must instead recreate the Job and leave PendingCallback set for the executor's own recovery path.
+func TestReconcilePendingCallback_TimeoutContinue_RecreatesRunnerJob(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-timeout-continue", "run-timeout-continue", ottoflowv1alpha1.FailurePolicyContinue)
+	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "ottoflow-role"}}
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, clusterRole).Build()
+	r := &WorkflowRunReconciler{
+		Client:       fakeClient,
+		Scheme:       unitTestScheme,
+		RunnerConfig: RunnerConfig{RunnerServiceAccount: "controller-manager", RunnerClusterRole: "ottoflow-role"},
+	}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+		t.Errorf("Phase = %v, want Running", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback == nil {
+		t.Fatal("expected PendingCallback to remain set so the recreated runner's executor applies the Continue recovery path")
+	}
+	if ss, ok := updated.Status.StepStatuses["gate"]; ok {
+		t.Errorf("controller must not mark the gate step itself on Continue; got StepStatuses[gate] = %+v", ss)
+	}
+
+	job := &batchv1.Job{}
+	if getErr := fakeClient.Get(ctx, types.NamespacedName{Name: workflowRunnerJobName(wr.Name), Namespace: ns}, job); getErr != nil {
+		t.Fatalf("expected runner Job to be recreated, got: %v", getErr)
+	}
+}
+
+// TestReconcilePendingCallback_TimeoutContinue_EmitsCallbackTimeoutEvent asserts the CallbackTimeout
+// event still fires on Continue even when there is no old runner Job to react to (e.g. its
+// completion-TTL already garbage collected it) — the event must not depend on the Job-state switch.
+func TestReconcilePendingCallback_TimeoutContinue_EmitsCallbackTimeoutEvent(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-timeout-continue-evt", "run-timeout-continue-evt", ottoflowv1alpha1.FailurePolicyContinue)
+	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "ottoflow-role"}}
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, clusterRole).Build()
+	recorder := events.NewFakeRecorder(10)
+	r := &WorkflowRunReconciler{
+		Client:        fakeClient,
+		Scheme:        unitTestScheme,
+		EventRecorder: recorder,
+		RunnerConfig:  RunnerConfig{RunnerServiceAccount: "controller-manager", RunnerClusterRole: "ottoflow-role"},
+	}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case evt := <-recorder.Events:
+		if !strings.Contains(evt, "CallbackTimeout") {
+			t.Errorf("event = %q, want CallbackTimeout", evt)
+		}
+	default:
+		t.Error("expected a CallbackTimeout event even when no old runner Job exists to react to")
+	}
+}
+
+// TestReconcilePendingCallback_TimeoutFail_TerminalFailure covers the Fail (default) failurePolicy
+// on timeout: the run must go terminally Failed, PendingCallback must be cleared (so the callback
+// endpoint stops accepting POSTs for a dead run), the gate step must be marked Failed, no runner
+// Job is created, and a CallbackTimeout event is still recorded.
+func TestReconcilePendingCallback_TimeoutFail_TerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-timeout-fail", "run-timeout-fail", ottoflowv1alpha1.FailurePolicyFail)
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr).Build()
+	recorder := events.NewFakeRecorder(10)
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme, EventRecorder: recorder}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Errorf("Phase = %v, want Failed", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback != nil {
+		t.Error("expected PendingCallback to be cleared on terminal failure")
+	}
+	if ss := updated.Status.StepStatuses["gate"]; ss.Phase != ottoflowv1alpha1.StepPhaseFailed {
+		t.Errorf("gate StepStatus.Phase = %v, want Failed", ss.Phase)
+	}
+
+	job := &batchv1.Job{}
+	getErr := fakeClient.Get(ctx, types.NamespacedName{Name: workflowRunnerJobName(wr.Name), Namespace: ns}, job)
+	if !apierrors.IsNotFound(getErr) {
+		t.Errorf("expected no runner Job to be created, Get returned: %v", getErr)
+	}
+
+	select {
+	case evt := <-recorder.Events:
+		if !strings.Contains(evt, "CallbackTimeout") {
+			t.Errorf("event = %q, want CallbackTimeout", evt)
+		}
+	default:
+		t.Error("expected a CallbackTimeout event to be recorded")
+	}
+}
+
+// TestReconcilePendingCallback_FallbackNamespacePolicy_ContinueResumes is the regression test for
+// Fix 1a: the Workflow here only resolves through the ControllerNamespace fallback (workflowRef
+// points at a namespace where it doesn't exist). The old findStepFailurePolicy did its own Get
+// without that fallback, so it could never find the step and always fell back to Fail — wrongly
+// failing a run that should have resumed under its actual Continue policy.
+func TestReconcilePendingCallback_FallbackNamespacePolicy_ContinueResumes(t *testing.T) {
+	ctx := context.Background()
+	wf := &ottoflowv1alpha1.Workflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "cost-analyzer", Namespace: "ottoflow-alt"},
+		Spec: ottoflowv1alpha1.WorkflowSpec{
+			Steps: []ottoflowv1alpha1.Step{
+				{
+					Name: "gate",
+					WaitForCallback: &ottoflowv1alpha1.WaitForCallbackStep{
+						Timeout:       "1h",
+						FailurePolicy: ottoflowv1alpha1.FailurePolicyContinue,
+					},
+				},
+			},
+		},
+	}
+	wr := &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-1", Namespace: "agents"},
+		Spec:       ottoflowv1alpha1.WorkflowRunSpec{WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "cost-analyzer", Namespace: "ottoflow"}},
+		Status: ottoflowv1alpha1.WorkflowRunStatus{
+			Phase: ottoflowv1alpha1.WorkflowRunPhaseRunning,
+			PendingCallback: &ottoflowv1alpha1.CallbackState{
+				TokenHash: "irrelevant-for-this-test",
+				StepName:  "gate",
+				ExpiresAt: time.Now().Add(-1 * time.Hour).Unix(),
+				CreatedAt: time.Now().Add(-2 * time.Hour).Unix(),
+			},
+		},
+	}
+	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "ottoflow-role"}}
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, clusterRole).Build()
+	r := &WorkflowRunReconciler{
+		Client:              fakeClient,
+		Scheme:              unitTestScheme,
+		ControllerNamespace: "ottoflow-alt",
+		RunnerConfig:        RunnerConfig{RunnerServiceAccount: "controller-manager", RunnerClusterRole: "ottoflow-role"},
+	}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "run-1", Namespace: "agents"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase == ottoflowv1alpha1.WorkflowRunPhaseFailed {
+		t.Fatal("a Continue policy resolved via the ControllerNamespace fallback must resume the run, not fail it")
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+		t.Errorf("Phase = %v, want Running", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback == nil {
+		t.Error("expected PendingCallback to remain set")
+	}
+}
+
+// TestReconcilePendingCallback_OutputsDelivered_NoOldJob_CreatesRunnerJob is a regression test for
+// the outputs-present branch after extracting resumeRunnerJob: a delivered (non-empty) callback
+// payload must still recreate the runner Job and retain PendingCallback even when there is no old
+// Job object at all (this reconciler is seeing the run for the first time since the callback landed).
+func TestReconcilePendingCallback_OutputsDelivered_NoOldJob_CreatesRunnerJob(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-delivered", "run-delivered", ottoflowv1alpha1.FailurePolicyFail)
+	// Not expired, and outputs already delivered: the outputs-present branch must win regardless
+	// of expiry or failurePolicy.
+	wr.Status.PendingCallback.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+	wr.Status.PendingCallback.Outputs = apiextensionsv1.JSON{Raw: []byte(`{"approved":true}`)}
+	clusterRole := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "ottoflow-role"}}
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, clusterRole).Build()
+	r := &WorkflowRunReconciler{
+		Client:       fakeClient,
+		Scheme:       unitTestScheme,
+		RunnerConfig: RunnerConfig{RunnerServiceAccount: "controller-manager", RunnerClusterRole: "ottoflow-role"},
+	}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+		t.Errorf("Phase = %v, want Running", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback == nil || len(updated.Status.PendingCallback.Outputs.Raw) == 0 {
+		t.Error("expected PendingCallback (with its delivered Outputs) to be retained for the executor")
+	}
+
+	job := &batchv1.Job{}
+	if getErr := fakeClient.Get(ctx, types.NamespacedName{Name: workflowRunnerJobName(wr.Name), Namespace: ns}, job); getErr != nil {
+		t.Fatalf("expected runner Job to be created, got: %v", getErr)
+	}
+}
+
+// TestReconcilePendingCallback_ActiveResumeJobFailedNoCondition_StaysMonitoring is the regression
+// test for Fix 1: a recreated resume Job with backoffLimit>0 can report Status.Failed>0 for an
+// in-flight pod retry well before Kubernetes sets the terminal JobFailed *condition*. Before the
+// fix, resumeRunnerJob's active-Job branch returned proceed=true unconditionally, so the caller
+// fell through to the normal Job-creation block's crude `job.Status.Failed>0` check, which
+// terminally failed the run (or restarted it) on what was actually just a transient pod failure —
+// defeating the JobFailed-condition gate in resumeRunnerJob's own JobFailed case. The fix keeps
+// monitoring inside the pending-callback path instead of falling through.
+func TestReconcilePendingCallback_ActiveResumeJobFailedNoCondition_StaysMonitoring(t *testing.T) {
+	ctx := context.Background()
+	ns := defaultNamespace
+	wf, wr := buildCallbackWorkflowAndRun("wf-active-resume", "run-active-resume", ottoflowv1alpha1.FailurePolicyFail)
+	// Not expired, and outputs already delivered: the outputs-present branch routes straight into
+	// resumeRunnerJob regardless of expiry or failurePolicy.
+	wr.Status.PendingCallback.ExpiresAt = time.Now().Add(1 * time.Hour).Unix()
+	wr.Status.PendingCallback.Outputs = apiextensionsv1.JSON{Raw: []byte(`{"approved":true}`)}
+
+	// The recreated resume Job already exists, is active, and has one failed pod (an in-flight
+	// backoffLimit>0 retry) but NO JobFailed condition yet.
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: workflowRunnerJobName(wr.Name), Namespace: ns},
+		Spec:       batchv1.JobSpec{BackoffLimit: ptr.To(int32(3))},
+		Status:     batchv1.JobStatus{Active: 1, Failed: 1},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(unitTestScheme).WithStatusSubresource(wr).WithObjects(wf, wr, job).Build()
+	r := &WorkflowRunReconciler{Client: fakeClient, Scheme: unitTestScheme}
+
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: wr.Name, Namespace: ns}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.RequeueAfter != 2*time.Second {
+		t.Errorf("RequeueAfter = %v, want 2s", result.RequeueAfter)
+	}
+
+	updatedJob := &batchv1.Job{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(job), updatedJob); getErr != nil {
+		t.Fatalf("expected resume Job to still exist (not deleted), got: %v", getErr)
+	}
+
+	updated := &ottoflowv1alpha1.WorkflowRun{}
+	if getErr := fakeClient.Get(ctx, client.ObjectKeyFromObject(wr), updated); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if updated.Status.Phase != ottoflowv1alpha1.WorkflowRunPhaseRunning {
+		t.Errorf("Phase = %v, want Running", updated.Status.Phase)
+	}
+	if updated.Status.PendingCallback == nil {
+		t.Error("expected PendingCallback to be retained while monitoring the active resume Job")
 	}
 }
 

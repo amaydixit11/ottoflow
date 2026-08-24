@@ -2,8 +2,9 @@
 # pod-triage hero for the README GIF (images/demo.gif).
 #
 # Regenerate with: make demo   (runs hack/gen-demo-gif.sh, which seeds
-#   hack/demo-fixture.yaml — crashy=OOMKilled, web-broken=ImagePullBackOff,
-#   healthy-web — waits for the crash-loop, records this tape, then removes it).
+#   samples/fixtures/failing-pods.yaml — crashy=OOMKilled, web-broken=ImagePullBackOff,
+#   healthy-web + healthy-api — waits for the crash-loop, records this tape, then
+#   removes it).
 #
 # Prereqs: vhs (brew install vhs), a throwaway cluster with an empty default ns
 #   (e.g. kind create cluster), a local model server, and LLAMACPP_HOST exported.

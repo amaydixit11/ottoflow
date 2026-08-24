@@ -60,7 +60,7 @@ jobs:
         run: make test-e2e
 
       - name: Ensure e2e-failure label exists
-        if: failure() && steps.e2e.outcome == 'failure'
+        if: failure() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -69,7 +69,7 @@ jobs:
             --description "E2E tests are failing on main" --force
 
       - name: Open or update tracking issue on failure
-        if: failure() && steps.e2e.outcome == 'failure'
+        if: failure() && github.ref == 'refs/heads/main'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -100,7 +100,7 @@ jobs:
             }
 
       - name: Close tracking issue on recovery
-        if: success()
+        if: success() && github.ref == 'refs/heads/main'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |

@@ -479,7 +479,9 @@ type clusterRunOptions struct {
 // non-nil, is a WorkflowRun already parsed from a bare file-path/URL argument in runWorkflow
 // (which fetched it once to classify its Kind) and is applied as-is; otherwise the WorkflowRun
 // is built from args the normal way (a local WorkflowRun file path, or a workflow name).
-func runWorkflowInCluster(ctx context.Context, k8sClient client.Client, args []string, preloadedRun *ottoflowv1alpha1.WorkflowRun) error {
+func runWorkflowInCluster(
+	ctx context.Context, k8sClient client.Client, args []string, preloadedRun *ottoflowv1alpha1.WorkflowRun,
+) error {
 	opts := clusterRunOptions{
 		workflowName:  workflowName,
 		inputValues:   inputValues,
@@ -584,7 +586,9 @@ func parseWorkflowRunDoc(data []byte) (wr *ottoflowv1alpha1.WorkflowRun, ok bool
 // (nil, wr, nil) for the caller to apply in-cluster; anything else (typically a Workflow) returns
 // (manifest, nil, nil) for local execution, with manifest holding the already-fetched bytes so
 // the caller never has to fetch the same URL a second time.
-func classifyRunSource(cmd *cobra.Command, ctx context.Context, ref string) ([]byte, *ottoflowv1alpha1.WorkflowRun, error) {
+func classifyRunSource(
+	cmd *cobra.Command, ctx context.Context, ref string,
+) ([]byte, *ottoflowv1alpha1.WorkflowRun, error) {
 	data, err := readRunSource(cmd, ctx, ref)
 	if err != nil {
 		return nil, nil, err

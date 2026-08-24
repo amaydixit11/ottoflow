@@ -135,8 +135,9 @@ func (e *WorkflowExecutor) executeForEach(ctx context.Context, workflowRun *otto
 
 	// A forEach where every item failed (or none completed at all) must never report success,
 	// regardless of itemFailurePolicy -- Continue only tolerates partial failure, not total failure.
+	// itemsList is non-empty here: the len(itemsList) == 0 case already returned above.
 	succeeded := len(results.Results) - len(results.Failed)
-	if len(itemsList) > 0 && succeeded == 0 {
+	if succeeded == 0 {
 		if len(results.Failed) > 0 {
 			return fmt.Errorf("forEach: all %d item(s) failed with itemFailurePolicy=%s; first failure to complete: %s",
 				len(itemsList), itemFailurePolicy, results.Failed[0].Error)

@@ -601,9 +601,10 @@ var _ = Describe("ForEach Executor", func() {
 	})
 
 	Context("When items fail", func() {
-		// alwaysFailingForEach builds a workflow whose every forEach item fails: the child
-		// expression indexes a field on a string item, which CEL rejects at evaluation.
-		alwaysFailingForEach := func(policy string) *ottoflowv1alpha1.Workflow {
+		// forEachWorkflow builds a workflow with a single forEach step over ["a", "b", "c"]:
+		// childExpr is evaluated once per item (as MaxConcurrency=1, so results stay
+		// deterministic regardless of completion order) under the given itemFailurePolicy.
+		forEachWorkflow := func(policy, childExpr string) *ottoflowv1alpha1.Workflow {
 			return &ottoflowv1alpha1.Workflow{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
 				Spec: ottoflowv1alpha1.WorkflowSpec{
@@ -617,7 +618,7 @@ var _ = Describe("ForEach Executor", func() {
 								Items: `variables.items`,
 								Step: &ottoflowv1alpha1.StepForEachStep{
 									Expressions: []ottoflowv1alpha1.Expression{
-										{Name: "boom", Expression: `variables.item.noSuchField`},
+										{Name: "boom", Expression: childExpr},
 									},
 								},
 								MaxConcurrency:    1,
@@ -627,6 +628,12 @@ var _ = Describe("ForEach Executor", func() {
 					},
 				},
 			}
+		}
+
+		// alwaysFailingForEach builds a workflow whose every forEach item fails: the child
+		// expression indexes a field on a string item, which CEL rejects at evaluation.
+		alwaysFailingForEach := func(policy string) *ottoflowv1alpha1.Workflow {
+			return forEachWorkflow(policy, `variables.item.noSuchField`)
 		}
 
 		It("fails the step when itemFailurePolicy is Fail", func() {
@@ -657,31 +664,8 @@ var _ = Describe("ForEach Executor", func() {
 		})
 
 		It("stays Succeeded with an accurate tally when only some items fail under itemFailurePolicy=Continue", func() {
-			// Only item "b" fails (field access on a string); "a" and "c" succeed. MaxConcurrency=1
-			// keeps this deterministic so the tally below is stable regardless of completion order.
-			workflow := &ottoflowv1alpha1.Workflow{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
-				Spec: ottoflowv1alpha1.WorkflowSpec{
-					Variables: []ottoflowv1alpha1.Variable{
-						{Name: "items", Expression: `["a", "b", "c"]`},
-					},
-					Steps: []ottoflowv1alpha1.Step{
-						{
-							Name: "loop",
-							ForEach: &ottoflowv1alpha1.StepForEach{
-								Items: `variables.items`,
-								Step: &ottoflowv1alpha1.StepForEachStep{
-									Expressions: []ottoflowv1alpha1.Expression{
-										{Name: "boom", Expression: `variables.item == "b" ? variables.item.noSuchField : variables.item`},
-									},
-								},
-								MaxConcurrency:    1,
-								ItemFailurePolicy: ottoflowv1alpha1.FailurePolicyContinue,
-							},
-						},
-					},
-				},
-			}
+			// Only item "b" fails (field access on a string); "a" and "c" succeed.
+			workflow := forEachWorkflow(ottoflowv1alpha1.FailurePolicyContinue, `variables.item == "b" ? variables.item.noSuchField : variables.item`)
 			Expect(workflowExecutor.contextManager.InitializeContext(ctx, workflow, workflowRun.Spec.InputValues)).To(Succeed())
 
 			Expect(workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)).To(Succeed())

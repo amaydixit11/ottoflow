@@ -158,9 +158,13 @@ func TestValidateStepRefs(t *testing.T) {
 		name        string
 		missingYAML string
 		presentYAML string
+		// wantMsgContains, when set, is asserted against the "missing is flagged" subtest's
+		// REF_NOT_FOUND message in addition to the shared code/count checks every case gets.
+		wantMsgContains []string
 	}{
 		{
-			name: "forEach stepTemplateRef",
+			name:            "forEach stepTemplateRef",
+			wantMsgContains: []string{"missing-tpl", "default"},
 			missingYAML: `apiVersion: ottoflow.nirmata.io/v1alpha1
 kind: Workflow
 metadata:
@@ -303,6 +307,11 @@ spec:
 				if len(errs) != 1 || errs[0].code != "REF_NOT_FOUND" {
 					t.Fatalf("expected exactly one REF_NOT_FOUND, got: %+v", errs)
 				}
+				for _, want := range tc.wantMsgContains {
+					if !strings.Contains(errs[0].message, want) {
+						t.Errorf("expected error message to contain %q, got: %s", want, errs[0].message)
+					}
+				}
 			})
 
 			t.Run("present is clean", func(t *testing.T) {
@@ -318,23 +327,6 @@ spec:
 			})
 		})
 	}
-
-	// The forEach case's missing-ref message additionally names the template and namespace,
-	// verified separately since the table above only checks the shared REF_NOT_FOUND shape.
-	t.Run("forEach stepTemplateRef message names template and namespace", func(t *testing.T) {
-		exec := buildLocalExecOrFatal(t, cases[0].missingYAML)
-		wf, err := exec.GetWorkflow(ctx, "wf", "default")
-		if err != nil {
-			t.Fatalf("GetWorkflow: %v", err)
-		}
-		errs := checkWorkflow(ctx, wf, exec.ControlClient(), celEnv, celEnvErr)
-		if len(errs) != 1 {
-			t.Fatalf("expected exactly one error, got: %+v", errs)
-		}
-		if !strings.Contains(errs[0].message, "missing-tpl") || !strings.Contains(errs[0].message, "default") {
-			t.Errorf("expected error naming template and namespace, got: %s", errs[0].message)
-		}
-	})
 }
 
 func TestValidateWorkflowRunRefs_MissingAndPresent(t *testing.T) {

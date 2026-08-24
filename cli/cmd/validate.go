@@ -306,20 +306,21 @@ func checkWorkflow(
 				}
 				seen[dedupKey] = struct{}{}
 
-				obj, err := newRefObject(ref.kind)
-				if err != nil {
-					// Unreachable given collectStepReferences only emits known kinds, but
-					// fail loudly rather than silently skip a check if that ever changes.
-					errs = append(errs, validationError{code: "REF_NOT_FOUND", step: step.Name, message: err.Error()})
+				info, ok := refKinds[ref.kind]
+				if !ok {
+					// Unreachable given collectStepReferences only emits kinds present in
+					// refKinds, but fail loudly rather than silently skip a check if that
+					// ever changes.
+					errs = append(errs, validationError{code: "REF_NOT_FOUND", step: step.Name, message: fmt.Sprintf("internal error: unknown reference kind %q", ref.kind)})
 					continue
 				}
 				nn := types.NamespacedName{Namespace: refNS, Name: ref.name}
-				if getErr := k8sClient.Get(ctx, nn, obj); getErr != nil {
+				if getErr := k8sClient.Get(ctx, nn, info.newObj()); getErr != nil {
 					if apierrors.IsNotFound(getErr) {
 						errs = append(errs, validationError{
 							code:    "REF_NOT_FOUND",
 							step:    step.Name,
-							message: fmt.Sprintf("%s %q not found in namespace %q", refLabel(ref.kind), ref.name, refNS),
+							message: fmt.Sprintf("%s %q not found in namespace %q", info.label, ref.name, refNS),
 						})
 					}
 				}
@@ -547,37 +548,22 @@ func collectStepReferences(step *ottoflowv1alpha1.Step) []stepRef {
 	return refs
 }
 
-// refLabel returns the field name to show in a validationError message for one reference kind.
-func refLabel(kind string) string {
-	switch kind {
-	case "Workflow":
-		return "workflowRef"
-	case "Agent":
-		return "agentRef"
-	case "StepTemplate":
-		return "stepTemplateRef"
-	case "MCPServer":
-		return "mcpToolCall.server"
-	default:
-		return kind
-	}
+// refKindInfo is how checkWorkflow reports and resolves one stepRef.kind: the field name to
+// show in a validationError message, and a constructor for the typed client.Object
+// k8sClient.Get should decode into.
+type refKindInfo struct {
+	label  string
+	newObj func() client.Object
 }
 
-// newRefObject returns a zero-value typed client.Object for kind, so k8sClient.Get can decode
-// into the correct CRD type. kind must be one collectStepReferences emits.
-func newRefObject(kind string) (client.Object, error) {
-	switch kind {
-	case "Workflow":
-		return &ottoflowv1alpha1.Workflow{}, nil
-	case "Agent":
-		return &ottoflowv1alpha1.Agent{}, nil
-	case "StepTemplate":
-		return &ottoflowv1alpha1.StepTemplate{}, nil
-	case "MCPServer":
-		return &ottoflowv1alpha1.MCPServer{}, nil
-	default:
-		return nil, fmt.Errorf("internal error: unknown reference kind %q", kind)
-	}
+// refKinds maps every kind collectStepReferences can emit to its refKindInfo. Keeping the
+// label and the object constructor in one table (instead of two parallel switches) means a new
+// reference kind can't have one added without the other.
+var refKinds = map[string]refKindInfo{
+	"Workflow":     {label: "workflowRef", newObj: func() client.Object { return &ottoflowv1alpha1.Workflow{} }},
+	"Agent":        {label: "agentRef", newObj: func() client.Object { return &ottoflowv1alpha1.Agent{} }},
+	"StepTemplate": {label: "stepTemplateRef", newObj: func() client.Object { return &ottoflowv1alpha1.StepTemplate{} }},
+	"MCPServer":    {label: "mcpToolCall.server", newObj: func() client.Object { return &ottoflowv1alpha1.MCPServer{} }},
 }
 
 // collectCELExpressions returns only the fields of a step that are definitively CEL

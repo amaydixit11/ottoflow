@@ -87,7 +87,7 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 ##@ Code generation (docs)
 
 .PHONY: codegen-api-docs
-codegen-api-docs: $(CRD_REF_DOCS) ## Generate CRD API reference docs (Markdown) from Go API types (elastic/crd-ref-docs).
+codegen-api-docs: crd-ref-docs ## Generate CRD API reference docs (Markdown) from Go API types (elastic/crd-ref-docs).
 	@echo "Generating CRD API reference docs..."
 	@mkdir -p docs/user/reference/api
 	$(CRD_REF_DOCS) \

@@ -58,23 +58,21 @@ func getVersion(cmd *cobra.Command, args []string) error {
 		Platform:  fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 	}
 
+	out := cmd.OutOrStdout()
 	switch versionOutputFormat {
 	case "json":
 		data, err := json.MarshalIndent(info, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal version info: %w", err)
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		_, err = fmt.Fprintln(out, string(data))
+		return err
 	case "table":
-		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "Version:    %s\n", info.Version)
-		fmt.Fprintf(out, "Git Commit: %s\n", info.GitCommit)
-		fmt.Fprintf(out, "Build Time: %s\n", info.BuildTime)
-		fmt.Fprintf(out, "Go Version: %s\n", info.GoVersion)
-		fmt.Fprintf(out, "Platform:   %s\n", info.Platform)
+		_, err := fmt.Fprintf(out,
+			"Version:    %s\nGit Commit: %s\nBuild Time: %s\nGo Version: %s\nPlatform:   %s\n",
+			info.Version, info.GitCommit, info.BuildTime, info.GoVersion, info.Platform)
+		return err
 	default:
 		return fmt.Errorf("unsupported output format: %s (must be table or json)", versionOutputFormat)
 	}
-
-	return nil
 }

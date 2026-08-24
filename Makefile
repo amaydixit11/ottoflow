@@ -20,6 +20,11 @@ HELM_VALUES_FILE ?= ""
 HELM_OUTPUT_DIR ?= config/generated
 HELM_OUTPUT_FILE ?= $(HELM_OUTPUT_DIR)/install.yaml
 
+# Every go invocation below builds this module alone. A go.work above the repo
+# root pulls its own replace directives into the build, so a checkout resolves
+# differently depending on where it sits in the caller's filesystem.
+export GOWORK := off
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq ($(shell go env GOBIN),)
 GOBIN=$(shell go env GOPATH)/bin
@@ -66,7 +71,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration and CustomResourceDefinition objects.
-	GOWORK=off $(CONTROLLER_GEN) crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	@$(MAKE) sync-crds
 
 .PHONY: sync-crds
@@ -82,7 +87,7 @@ sync-crds: ## Sync CRDs from config/crd/bases to charts/ottoflow/crds (source of
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	GOWORK=off $(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 ##@ Code generation (docs)
 
@@ -465,8 +470,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
-# Try to use system ko first, fall back to local installation
-KO ?= $(shell which ko 2>/dev/null || echo $(LOCALBIN)/ko-$(KO_VERSION))
+KO ?= $(LOCALBIN)/ko-$(KO_VERSION)
 # Try to use system helm first, fall back to local installation
 HELM ?= $(shell which helm 2>/dev/null || echo $(LOCALBIN)/helm-$(HELM_VERSION))
 
@@ -476,7 +480,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.20.0
 ENVTEST_VERSION ?= release-0.17
 GOLANGCI_LINT_VERSION ?= v2.11.4
 CRD_REF_DOCS_VERSION ?= v0.3.0
-KO_VERSION ?= latest
+KO_VERSION ?= v0.17.1
 HELM_VERSION ?= v3.13.0
 
 .PHONY: kustomize
@@ -497,15 +501,12 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	test -s $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION) || { curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION) && mv $(LOCALBIN)/golangci-lint $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION) ; }
+	test -s $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION) || { curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh | sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION) && mv $(LOCALBIN)/golangci-lint $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION) ; }
 
 .PHONY: ko
 ko: $(KO) ## Download ko locally if necessary.
 $(KO): $(LOCALBIN)
-	@if [ "$(shell which ko 2>/dev/null)" = "" ]; then \
-		echo "Installing ko..."; \
-		GOBIN=$(LOCALBIN) go install github.com/google/ko@$(KO_VERSION) && mv $(LOCALBIN)/ko $(LOCALBIN)/ko-$(KO_VERSION); \
-	fi
+	test -s $(LOCALBIN)/ko-$(KO_VERSION) || { GOBIN=$(LOCALBIN) go install github.com/google/ko@$(KO_VERSION) && mv $(LOCALBIN)/ko $(LOCALBIN)/ko-$(KO_VERSION) ; }
 
 .PHONY: crd-ref-docs
 crd-ref-docs: $(CRD_REF_DOCS) ## Download elastic/crd-ref-docs locally if necessary.

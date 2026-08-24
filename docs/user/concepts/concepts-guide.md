@@ -306,7 +306,7 @@ ottoflow run <workflow-name> --workflow-dir ./workflows
 In local mode:
 - Workflow YAML is loaded from disk into a fake control-plane client built from the files in that directory — StepTemplates (and other referenced OttoFlow objects) must live under the same directory tree
 - `WorkflowExecutor` runs in-process (no Job is created)
-- `--namespace` must match the workflow's own `metadata.namespace`, even in local mode
+- `--namespace` is only used to disambiguate when multiple loaded workflows share the same name; a uniquely-named workflow resolves regardless of `--namespace`
 - Agent steps use a local `agentExecutor` (requires LLM credentials)
 - MCP servers still connect via stdio/http
 - `resourceMetrics()` works: a metrics client is wired from your kubeconfig

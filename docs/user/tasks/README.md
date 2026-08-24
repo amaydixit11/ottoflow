@@ -18,4 +18,4 @@ For step types (resource queries, agents, mutate, forEach, and more), see the [W
 
 - **[Concepts](../concepts/)** - Understanding OttoFlow architecture
 - **[Reference](../reference/)** - API and CEL function reference
-- **[Examples](../../../samples/workflows/)** - 30+ sample workflows
+- **[Examples](../../../samples/workflows/)** - 80+ sample workflows

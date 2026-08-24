@@ -45,14 +45,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-build-
 
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-gomod-
-
       - name: Download Go modules
         run: go mod download
 
@@ -104,28 +96,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-build-
 
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-gomod-
-
       - name: Download Go modules
         run: go mod download
 
       - name: Ensure SHA pinned actions
         uses: zgosalvez/github-actions-ensure-sha-pinned-actions@c5fc58bd0be7a4b94b73ce40250322d5b838a108 # v5.0.7
-
-      - name: Cache golangci-lint
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('.golangci.yml') }}-v2.11.4
-          restore-keys: |
-            ${{ runner.os }}-golangci-lint-v2.11.4-
-            ${{ runner.os }}-golangci-lint-
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -156,14 +131,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-build-
 
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-gomod-
-
       - name: Download Go modules
         run: go mod download
 
@@ -180,7 +147,6 @@ jobs:
       id-token: write
       packages: write
       pull-requests: write
-    needs: [build]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -200,14 +166,6 @@ jobs:
           key: ${{ runner.os }}-go-build-${{ hashFiles('**/*.go', 'go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-build-
-
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-gomod-
 
       - name: Cache envtest binaries
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -248,14 +206,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-build-
 
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-gomod-
-
       - name: Set up ko
         uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
         with:
@@ -275,4 +225,29 @@ jobs:
         run: |
           make manifests generate
           KO_DOCKER_REPO=ghcr.io/nirmata/ottoflow make ko-build
+
+  e2e-gate:
+    # e2e tests run against a kind cluster after merge (see e2e.yaml), not per-PR,
+    # since they take several minutes and need a real cluster. This gate blocks new
+    # PRs while main is known-broken, tracked by an open "e2e-failure" issue.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check for open e2e-failure issues on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          open_issues=$(gh issue list --label e2e-failure --state open --json number,title,url)
+          count=$(echo "$open_issues" | jq 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "::error::E2E tests are failing on main. Merges are blocked until the tracking issue is closed:"
+            echo "$open_issues" | jq -r '.[] | "  #\(.number) \(.title) - \(.url)"'
+            exit 1
+          fi
+          echo "No open e2e-failure issues. OK to proceed."
 

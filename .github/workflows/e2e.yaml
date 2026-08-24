@@ -1,0 +1,127 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: E2E
+
+permissions: {}
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-main
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Cache Go build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/*.go', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+        with:
+          version: v0.17.1
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: kind
+
+      - name: Run e2e tests
+        id: e2e
+        env:
+          SKIP_PROMETHEUS_OPERATOR: '1'
+        run: make test-e2e
+
+      - name: Ensure e2e-failure label exists
+        if: failure() && steps.e2e.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh label create e2e-failure --color d73a4a \
+            --description "E2E tests are failing on main" --force
+
+      - name: Open or update tracking issue on failure
+        if: failure() && steps.e2e.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const label = 'e2e-failure';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `E2E tests failed on \`main\` at ${context.sha}.\n\nRun: ${runUrl}\n\nNew pull requests are blocked (see the \`e2e-gate\` check in CI) until this issue is closed.`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'E2E tests failing on main',
+                body,
+                labels: [label],
+              });
+            }
+
+      - name: Close tracking issue on recovery
+        if: success()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const label = 'e2e-failure';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+            for (const issue of issues) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `E2E tests passed on \`main\` at ${context.sha}. Closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }

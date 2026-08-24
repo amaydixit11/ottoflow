@@ -25,4 +25,5 @@ OttoFlow allows you to:
 * [ottoflow run](ottoflow_run.md)	 - Create and watch a WorkflowRun
 * [ottoflow status](ottoflow_status.md)	 - Get status of a workflow run
 * [ottoflow validate](ottoflow_validate.md)	 - Validate a Workflow definition without executing it
+* [ottoflow version](ottoflow_version.md)	 - Show CLI build version details
 

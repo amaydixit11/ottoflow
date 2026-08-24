@@ -198,7 +198,7 @@ CLI_MAIN_PACKAGE=./cli/main.go
 CLI_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 CLI_BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
 CLI_GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-CLI_LDFLAGS=-ldflags "-X github.com/nirmata/ottoflow/cli/cmd.version=$(CLI_VERSION) -X main.buildTime=$(CLI_BUILD_TIME) -X main.gitCommit=$(CLI_GIT_COMMIT)"
+CLI_LDFLAGS=-ldflags "-X github.com/nirmata/ottoflow/cli/cmd.version=$(CLI_VERSION) -X github.com/nirmata/ottoflow/cli/cmd.buildTime=$(CLI_BUILD_TIME) -X github.com/nirmata/ottoflow/cli/cmd.gitCommit=$(CLI_GIT_COMMIT)"
 
 .PHONY: build-cli
 build-cli: manifests generate fmt vet ## Build CLI binary.

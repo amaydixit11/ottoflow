@@ -84,10 +84,10 @@ sync-crds: ## Sync CRDs from config/crd/bases to charts/ottoflow/crds (source of
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	GOWORK=off $(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
-##@ Code generation (API docs)
+##@ Code generation (docs)
 
 .PHONY: codegen-api-docs
-codegen-api-docs: $(CRD_REF_DOCS) ## Generate CRD API reference docs (Markdown) from Go API types (elastic/crd-ref-docs).
+codegen-api-docs: crd-ref-docs ## Generate CRD API reference docs (Markdown) from Go API types (elastic/crd-ref-docs).
 	@echo "Generating CRD API reference docs..."
 	@mkdir -p docs/user/reference/api
 	$(CRD_REF_DOCS) \
@@ -96,6 +96,39 @@ codegen-api-docs: $(CRD_REF_DOCS) ## Generate CRD API reference docs (Markdown) 
 		--renderer=markdown \
 		--output-path=docs/user/reference/api/api-docs.md
 	@echo "Generated docs/user/reference/api/api-docs.md"
+
+.PHONY: codegen-cli-docs
+codegen-cli-docs: ## Generate CLI reference docs (Markdown) from the Cobra command tree into docs/cli/.
+	@echo "Generating CLI reference docs..."
+	@rm -rf docs/cli
+	go test -tags gendocs -count=1 ./cli/cmd/... -run '^TestGenerateCliDocs$$' -v
+	@echo "Generated docs/cli/*.md"
+
+.PHONY: codegen-docs
+codegen-docs: codegen-api-docs codegen-cli-docs ## Generate all reference docs (CRD API docs + CLI docs).
+
+##@ Verification
+
+# Paths written by manifests/generate/codegen-api-docs/codegen-cli-docs. Checked with
+# `git status --porcelain`, not `git diff`, because docs/cli/ (and any newly-added CRD file)
+# starts out untracked -- a plain `git diff` only catches modified tracked files and would
+# silently pass even though the freshly generated file was never committed.
+CODEGEN_PATHS := config/crd/bases charts/ottoflow/crds api/v1alpha1/zz_generated.deepcopy.go docs/user/reference/api docs/cli
+
+.PHONY: verify-codegen
+verify-codegen: manifests generate codegen-docs ## Fail if generated CRDs, deepcopy code, or docs are stale or uncommitted.
+	@echo "Checking for uncommitted changes from code generation..."
+	@CHANGES="$$(git status --porcelain -- $(CODEGEN_PATHS))"; \
+	if [ -n "$$CHANGES" ]; then \
+		echo ""; \
+		echo "Generated files are out of date or not committed. Run 'make manifests generate codegen-docs'" >&2; \
+		echo "and commit the result. Changed/untracked paths:" >&2; \
+		echo "$$CHANGES" >&2; \
+		exit 1; \
+	fi
+	@echo "Generated files are up to date."
+
+##@ Development (misc)
 
 .PHONY: licenses
 licenses: ## Regenerate THIRD_PARTY_LICENSES.md

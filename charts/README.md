@@ -10,7 +10,7 @@ helm install ottoflow oci://ghcr.io/nirmata/ottoflow --version <version> -n otto
 
 ## Prerequisites
 
-- Kubernetes 1.20+
+- Kubernetes 1.29+
 
 ## Documentation
 

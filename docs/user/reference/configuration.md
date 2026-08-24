@@ -28,7 +28,7 @@ Each section below applies to a specific component. See [Architecture](../concep
 
 | Flag | Shorthand | Default | Description |
 |------|-----------|---------|-------------|
-| `--namespace` | `-n` | kubeconfig context namespace, else `ottoflow` | Kubernetes namespace for workflow resources. In local mode (`--workflow-dir`) this must match the workflow's own `metadata.namespace`. |
+| `--namespace` | `-n` | kubeconfig context namespace, else `ottoflow` | Kubernetes namespace for workflow resources. In local mode (`--workflow-dir`), `--namespace` is only used to disambiguate when multiple loaded workflows share the same name; a uniquely-named workflow resolves regardless of `--namespace`. |
 | `--kubeconfig` | | `$HOME/.kube/config` (honors `$KUBECONFIG`) | Path to kubeconfig file |
 
 ### `ottoflow run`

@@ -133,7 +133,12 @@ func (e *WorkflowExecutor) executeForEach(ctx context.Context, workflowRun *otto
 			len(results.Failed), results.Failed[0].Error)
 	}
 
-	// Evaluate step-level outputs (if any) that can reference results
+	// Evaluate step-level outputs (if any) that can reference results. This must happen
+	// before the succeeded==0 guard below returns an error: a forEach step can carry its
+	// own step-level failurePolicy: Continue, which lets the workflow proceed past a Failed
+	// forEach step -- but only if the step's declared outputs actually got written to
+	// context. Otherwise a downstream steps.<name>.<out> / variables.<out> read would hit
+	// "no such key" even though the workflow "succeeded".
 	if len(step.Outputs) > 0 {
 		// Read updated context (now includes steps map with results)
 		contextData, err := e.contextManager.ReadContext(ctx)
@@ -157,12 +162,25 @@ func (e *WorkflowExecutor) executeForEach(ctx context.Context, workflowRun *otto
 		}
 	}
 
+	// A forEach where every item failed (or none completed at all) must never report success,
+	// regardless of itemFailurePolicy -- Continue only tolerates partial failure, not total failure.
+	// itemsList is non-empty here: the len(itemsList) == 0 case already returned above.
+	succeeded := len(results.Results) - len(results.Failed)
+	if succeeded == 0 {
+		firstFailure := ""
+		if len(results.Failed) > 0 {
+			firstFailure = results.Failed[0].Error
+		}
+		return foreachFailureError(len(itemsList), len(results.Failed), itemFailurePolicy, firstFailure)
+	}
+
 	// itemFailurePolicy=Continue succeeds by design, but a partially or fully failed loop
-	// must not look identical to a clean one. Record the tally on the step message.
+	// must not look identical to a clean one. Record the tally on the step message. Reuses
+	// the same succeeded count as the guard above so the two never disagree.
 	if len(results.Failed) > 0 {
 		if st, ok := workflowRun.Status.StepStatuses[step.Name]; ok {
 			st.Message = fmt.Sprintf("%d/%d items succeeded, %d failed",
-				len(itemsList)-len(results.Failed), len(itemsList), len(results.Failed))
+				succeeded, len(itemsList), len(results.Failed))
 			workflowRun.Status.StepStatuses[step.Name] = st
 			e.invokeForEachProgressCallback(workflowRun)
 		}
@@ -172,6 +190,26 @@ func (e *WorkflowExecutor) executeForEach(ctx context.Context, workflowRun *otto
 	}
 
 	return nil
+}
+
+// foreachFailureError builds the terminal error for a forEach loop that produced zero
+// successful items. failed is the number of items that recorded a failure; because a worker
+// records a failure entry and a result entry together, failed also equals the number of items
+// that ran to completion. When failed < requested, the remaining items never recorded a result
+// -- the context was cancelled mid-loop -- so they are reported as incomplete rather than folded
+// into an "all N failed" claim. firstFailure is the first failure message by completion order,
+// or "" when nothing failed (failed == 0).
+func foreachFailureError(requested, failed int, itemFailurePolicy, firstFailure string) error {
+	switch {
+	case failed == 0:
+		return fmt.Errorf("forEach: no items completed successfully (loop cancelled or incomplete); %d item(s) requested", requested)
+	case failed < requested:
+		return fmt.Errorf("forEach: %d of %d item(s) failed and %d did not complete (loop cancelled or incomplete) with itemFailurePolicy=%s; first failure to complete: %s",
+			failed, requested, requested-failed, itemFailurePolicy, firstFailure)
+	default:
+		return fmt.Errorf("forEach: all %d item(s) failed with itemFailurePolicy=%s; first failure to complete: %s",
+			requested, itemFailurePolicy, firstFailure)
+	}
 }
 
 // processItemsConcurrently processes items using a worker pool pattern

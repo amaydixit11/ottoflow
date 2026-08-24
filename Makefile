@@ -100,7 +100,8 @@ codegen-api-docs: crd-ref-docs ## Generate CRD API reference docs (Markdown) fro
 .PHONY: codegen-cli-docs
 codegen-cli-docs: ## Generate CLI reference docs (Markdown) from the Cobra command tree into docs/cli/.
 	@echo "Generating CLI reference docs..."
-	go test -tags gendocs ./cli/cmd/... -run '^TestGenerateCliDocs$$' -v
+	@rm -rf docs/cli
+	go test -tags gendocs -count=1 ./cli/cmd/... -run '^TestGenerateCliDocs$$' -v
 	@echo "Generated docs/cli/*.md"
 
 .PHONY: codegen-docs

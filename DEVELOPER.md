@@ -250,6 +250,8 @@ pull requests. Its jobs:
 - **build** — `make build-cli`, then `helm lint`/`helm template` the chart and the chart RBAC
   assertions (`go test ./test/chart/...`); uploads `bin/ottoflow` as an artifact.
 - **lint** — `golangci-lint` (v2.11.4) and a check that all Actions are SHA-pinned.
+- **verify-codegen** — `make verify-codegen`; fails if generated CRDs, deepcopy code, or docs
+  (CRD API reference, CLI reference) are stale or uncommitted.
 - **validate-samples** — builds the CLI, then `ottoflow validate --workflow-dir samples`.
 - **test** — `make test` (with cached envtest binaries for Kubernetes 1.29.0).
 - **images** — on pushes to `main` (not on PRs or tags), builds and pushes all three

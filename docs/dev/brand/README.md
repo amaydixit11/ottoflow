@@ -14,11 +14,11 @@ Design tokens: [`ottoflow-tokens.css`](ottoflow-tokens.css).
 The primary form. Use it wherever there is room for a wide mark — README headers,
 site navigation, slide masters, docs.
 
-![OttoFlow horizontal lockup on light](../../images/brand/ottoflow-horizontal-light.png)
+![OttoFlow horizontal lockup on light](../../../images/brand/ottoflow-horizontal-light.png)
 
 On Otter Navy or any dark surface, "Otto" switches to white. The teal stays the same.
 
-![OttoFlow horizontal lockup on dark](../../images/brand/ottoflow-horizontal-dark.png)
+![OttoFlow horizontal lockup on dark](../../../images/brand/ottoflow-horizontal-dark.png)
 
 ### Vertical lockup
 
@@ -27,16 +27,16 @@ sticker sheets, centred title cards.
 
 | Light | Dark |
 |---|---|
-| ![Vertical lockup, light](../../images/brand/ottoflow-vertical-light.png) | ![Vertical lockup, dark](../../images/brand/ottoflow-vertical-dark.png) |
+| ![Vertical lockup, light](../../../images/brand/ottoflow-vertical-light.png) | ![Vertical lockup, dark](../../../images/brand/ottoflow-vertical-dark.png) |
 
 ### Icon
 
 | Asset | File | Use |
 |---|---|---|
-| Circular mark, transparent | [`ottoflow-icon-circle.png`](../../images/brand/ottoflow-icon-circle.png) | Avatars, favicons, anywhere the background shows through |
-| Rounded square on Otter Navy | [`ottoflow-icon-rounded.png`](../../images/brand/ottoflow-icon-rounded.png) | App icons, PWA, Apple touch icon |
+| Circular mark, transparent | [`ottoflow-icon-circle.png`](../../../images/brand/ottoflow-icon-circle.png) | Avatars, favicons, anywhere the background shows through |
+| Rounded square on Otter Navy | [`ottoflow-icon-rounded.png`](../../../images/brand/ottoflow-icon-rounded.png) | App icons, PWA, Apple touch icon |
 
-Pre-scaled sizes live in [`images/brand/icons/`](../../images/brand/icons/):
+Pre-scaled sizes live in [`images/brand/icons/`](../../../images/brand/icons/):
 `ottoflow-icon-{512,256,128,64,32,16}.png` and `ottoflow-rounded-{512,192,180}.png`.
 
 ### Clear space and minimum size
@@ -62,7 +62,7 @@ Pre-scaled sizes live in [`images/brand/icons/`](../../images/brand/icons/):
 
 | Swatch | Name | Hex | Use |
 |---|---|---|---|
-| ▉ | OttoFlow Teal | `#7BC3C7` | Signature accent — "Flow" in the wordmark, links, active states |
+| ▉ | OttoFlow Teal | `#7BC3C7` | Signature accent — "Flow" in the wordmark, active states |
 | ▉ | Otter Navy | `#192C5D` | Dark surfaces, glasses frame |
 | ▉ | Deep Sea | `#1A3D6F` | Icon backdrop, dark panels |
 | ▉ | Wordmark Black | `#000000` | "Otto" in the logotype **only** |

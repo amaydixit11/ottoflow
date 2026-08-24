@@ -112,7 +112,7 @@ func init() {
 	runCmd.Flags().StringVarP(&runFile, "file", "f", "",
 		"Run a manifest locally, in-process, from a file, an http(s) URL, or '-' for stdin (no cluster/controller required)")
 	runCmd.Flags().BoolVar(&allowInsecureURL, "allow-insecure-url", false,
-		"Permit http:// (non-TLS) URLs with -f")
+		"Permit http:// (non-TLS) URLs with -f or a bare http(s) URL argument")
 	runCmd.Flags().StringToStringVarP(&inputValues, "input", "i", map[string]string{},
 		"Input values as key=value pairs (can be specified multiple times)")
 	runCmd.Flags().StringVar(&timeout, "timeout", "10m", "Maximum time to wait for workflow completion (cluster watch)")

@@ -49,7 +49,7 @@ ottoflow run [workflow-name|workflow-file.yaml] [flags]
 ### Options
 
 ```
-      --allow-insecure-url      Permit http:// (non-TLS) URLs with -f
+      --allow-insecure-url      Permit http:// (non-TLS) URLs with -f or a bare http(s) URL argument
   -f, --file string             Run a manifest locally, in-process, from a file, an http(s) URL, or '-' for stdin (no cluster/controller required)
   -h, --help                    help for run
       --include-inputs          Include spec.inputValues in json/yaml output (may contain secrets; use only when needed)

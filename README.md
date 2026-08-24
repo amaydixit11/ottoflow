@@ -82,7 +82,7 @@ ottoflow run https://raw.githubusercontent.com/nirmata/ottoflow/refs/heads/main/
 This runs in-process against your current kubecontext, read-only — no
 controller, no CRDs, nothing installed in your cluster, nothing to uninstall.
 
-For details on the data collection, analysis, and reporting view the [worklflow source](https://github.com/nirmata/ottoflow/blob/main/samples/workflows/production/cluster-overview.yaml).
+For details on the data collection, analysis, and reporting view the [workflow source](https://github.com/nirmata/ottoflow/blob/main/samples/workflows/production/cluster-overview.yaml).
 
 ## Execute an AI workflow
 
@@ -152,7 +152,7 @@ Outputs:
   system logs for crash reasons and potential resource constraints.
 ```
 
-For details view the complete [worklflow source](https://github.com/nirmata/ottoflow/blob/main/samples/workflows/production/pod-triage.yaml).
+For details view the complete [workflow source](https://github.com/nirmata/ottoflow/blob/main/samples/workflows/production/pod-triage.yaml).
 
 ## 🛠️ Five workflows you'll actually use
 
@@ -208,6 +208,6 @@ and the PR process, and [GOVERNANCE.md](GOVERNANCE.md) for how decisions get mad
 
 Built with ❤️ by the Nirmata team
 
-[Report Bug](https://github.com/nirmata/runtime/issues) · [Request Feature](https://github.com/nirmata/runtime/issues)
+[Report Bug](https://github.com/nirmata/ottoflow/issues) · [Request Feature](https://github.com/nirmata/ottoflow/issues)
 
 </div>

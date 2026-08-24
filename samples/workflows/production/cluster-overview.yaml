@@ -88,7 +88,7 @@ spec:
         - name: failedPodDetails
           expression: >-
             variables.pods.filter(p, p.status.phase == "Failed").map(p,
-              format("- **%s/%s** (Failed): %s — `kubectl logs %s -n %s --previous`",
+              format("- **%s/%s** (Failed): %s — `kubectl logs %s -n %s --previous --all-containers=true`",
                 p.metadata.namespace, p.metadata.name,
                 has(p.status.reason) && p.status.reason != "" ? p.status.reason :
                   (has(p.status.containerStatuses) && p.status.containerStatuses.exists(c,

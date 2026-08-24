@@ -28,7 +28,11 @@ ARCH=arm64           # or amd64
 
 curl -sSLO "https://github.com/nirmata/ottoflow/releases/download/${VERSION}/ottoflow_${VERSION#v}_${OS}_${ARCH}.tar.gz"
 curl -sSLO "https://github.com/nirmata/ottoflow/releases/download/${VERSION}/checksums.txt"
+
+# Linux (GNU coreutils):
 sha256sum --ignore-missing -c checksums.txt
+# macOS (no sha256sum by default):
+grep "${OS}_${ARCH}" checksums.txt | shasum -a 256 -c -
 
 tar -xzf "ottoflow_${VERSION#v}_${OS}_${ARCH}.tar.gz"
 sudo mv ottoflow /usr/local/bin/

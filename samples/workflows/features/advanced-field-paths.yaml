@@ -1,7 +1,7 @@
 apiVersion: ottoflow.nirmata.io/v1alpha1
 kind: Workflow
 metadata:
-  name: cel-expressions-example
+  name: advanced-field-paths-example
   namespace: ottoflow
 spec:
   inputs:

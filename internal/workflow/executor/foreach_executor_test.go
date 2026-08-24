@@ -639,18 +639,87 @@ var _ = Describe("ForEach Executor", func() {
 			Expect(workflowRun.Status.StepStatuses["loop"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseFailed))
 		})
 
-		It("succeeds but records the tally when itemFailurePolicy is Continue", func() {
+		It("fails the step when every item fails under itemFailurePolicy=Continue", func() {
 			workflow := alwaysFailingForEach(ottoflowv1alpha1.FailurePolicyContinue)
 			Expect(workflowExecutor.contextManager.InitializeContext(ctx, workflow, workflowRun.Spec.InputValues)).To(Succeed())
 
-			// Continue is documented to collect failures and carry on, so the step succeeds.
-			// What must not happen is a fully-failed loop looking identical to a clean one.
-			Expect(workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)).To(Succeed())
-			Expect(workflowRun.Status.StepStatuses["loop"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseSucceeded))
-			Expect(workflowRun.Status.StepStatuses["loop"].Message).To(Equal("0/3 items succeeded, 3 failed"))
+			// Continue tolerates partial failure, but a loop where every item failed must
+			// never report success -- that would be a false green. It must not look identical
+			// to a clean run.
+			err := workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("all 3 item(s) failed"))
+			Expect(workflowRun.Status.StepStatuses["loop"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseFailed))
 
+			// Failures remain available in context for debugging even though the step failed.
 			failed := workflowExecutor.contextManager.GetContext()["steps"].(map[string]interface{})["loop"].(map[string]interface{})["failed"].([]interface{})
 			Expect(failed).To(HaveLen(3))
+		})
+
+		It("stays Succeeded with an accurate tally when only some items fail under itemFailurePolicy=Continue", func() {
+			// Only item "b" fails (field access on a string); "a" and "c" succeed. MaxConcurrency=1
+			// keeps this deterministic so the tally below is stable regardless of completion order.
+			workflow := &ottoflowv1alpha1.Workflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
+				Spec: ottoflowv1alpha1.WorkflowSpec{
+					Variables: []ottoflowv1alpha1.Variable{
+						{Name: "items", Expression: `["a", "b", "c"]`},
+					},
+					Steps: []ottoflowv1alpha1.Step{
+						{
+							Name: "loop",
+							ForEach: &ottoflowv1alpha1.StepForEach{
+								Items: `variables.items`,
+								Step: &ottoflowv1alpha1.StepForEachStep{
+									Expressions: []ottoflowv1alpha1.Expression{
+										{Name: "boom", Expression: `variables.item == "b" ? variables.item.noSuchField : variables.item`},
+									},
+								},
+								MaxConcurrency:    1,
+								ItemFailurePolicy: ottoflowv1alpha1.FailurePolicyContinue,
+							},
+						},
+					},
+				},
+			}
+			Expect(workflowExecutor.contextManager.InitializeContext(ctx, workflow, workflowRun.Spec.InputValues)).To(Succeed())
+
+			Expect(workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)).To(Succeed())
+			Expect(workflowRun.Status.StepStatuses["loop"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseSucceeded))
+			Expect(workflowRun.Status.StepStatuses["loop"].Message).To(Equal("2/3 items succeeded, 1 failed"))
+
+			failed := workflowExecutor.contextManager.GetContext()["steps"].(map[string]interface{})["loop"].(map[string]interface{})["failed"].([]interface{})
+			Expect(failed).To(HaveLen(1))
+		})
+
+		It("fails the step when stepTemplateRef resolution fails for every item", func() {
+			// No StepTemplate named "does-not-exist" is registered with the fake client, so
+			// every item fails during template resolution before the child step ever runs.
+			workflow := &ottoflowv1alpha1.Workflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-workflow", Namespace: "default"},
+				Spec: ottoflowv1alpha1.WorkflowSpec{
+					Variables: []ottoflowv1alpha1.Variable{
+						{Name: "items", Expression: `["a", "b"]`},
+					},
+					Steps: []ottoflowv1alpha1.Step{
+						{
+							Name: "loop",
+							ForEach: &ottoflowv1alpha1.StepForEach{
+								Items: `variables.items`,
+								StepTemplateRef: &ottoflowv1alpha1.StepForEachTemplateRef{
+									Name: "does-not-exist",
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(workflowExecutor.contextManager.InitializeContext(ctx, workflow, workflowRun.Spec.InputValues)).To(Succeed())
+
+			err := workflowExecutor.ExecuteWorkflow(ctx, workflow, workflowRun)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("all 2 item(s) failed"))
+			Expect(workflowRun.Status.StepStatuses["loop"].Phase).To(Equal(ottoflowv1alpha1.StepPhaseFailed))
 		})
 	})
 

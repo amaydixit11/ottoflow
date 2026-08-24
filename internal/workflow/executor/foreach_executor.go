@@ -133,6 +133,17 @@ func (e *WorkflowExecutor) executeForEach(ctx context.Context, workflowRun *otto
 			len(results.Failed), results.Failed[0].Error)
 	}
 
+	// A forEach where every item failed (or none completed at all) must never report success,
+	// regardless of itemFailurePolicy -- Continue only tolerates partial failure, not total failure.
+	succeeded := len(results.Results) - len(results.Failed)
+	if len(itemsList) > 0 && succeeded == 0 {
+		if len(results.Failed) > 0 {
+			return fmt.Errorf("forEach: all %d item(s) failed with itemFailurePolicy=%s; first failure to complete: %s",
+				len(itemsList), itemFailurePolicy, results.Failed[0].Error)
+		}
+		return fmt.Errorf("forEach: no items completed successfully (loop cancelled or incomplete); %d item(s) requested", len(itemsList))
+	}
+
 	// Evaluate step-level outputs (if any) that can reference results
 	if len(step.Outputs) > 0 {
 		// Read updated context (now includes steps map with results)

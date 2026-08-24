@@ -49,7 +49,11 @@ Checks performed:
   - Step expression-to-dependsOn alignment (MISSING_DEPENDS_ON)
   - Undefined inputs.* references (UNDEFINED_INPUT)
   - CEL expression syntax (compile-time, no evaluation)
-  - WorkflowRef and AgentRef existence (when connected to a cluster)
+  - workflowRef, agentRef, stepTemplateRef (direct and forEach), and mcpToolCall.server
+    existence, checked against the cluster in cluster mode, or against the manifests loaded
+    from --workflow-dir in local mode; also checked for a loaded WorkflowRun's workflowRef.
+    NOTE: references declared inside an inline forEach.step are not statically resolved and
+    will only surface as a failure at run time.
 
 Examples:
   ottoflow validate --workflow-dir samples        # validate all workflows in directory
@@ -185,7 +189,7 @@ func runValidateDir(ctx context.Context, dir string) error {
 
 	anyFailed := false
 	for _, wf := range workflows {
-		errs := checkWorkflow(ctx, wf, nil, celEnv, celEnvErr)
+		errs := checkWorkflow(ctx, wf, exec.ControlClient(), celEnv, celEnvErr)
 		if len(errs) == 0 {
 			fmt.Printf("OK   workflow %q passed all checks\n", wf.Name)
 		} else {
@@ -196,6 +200,18 @@ func runValidateDir(ctx context.Context, dir string) error {
 			}
 		}
 	}
+
+	// WorkflowRun -> Workflow existence: a WorkflowRun whose workflowRef names a Workflow
+	// that was not loaded (typo, wrong namespace, missing file) will fail at run time even
+	// though checkWorkflow above never sees it -- it only walks loaded Workflow steps.
+	for _, res := range checkWorkflowRunRefs(ctx, exec) {
+		anyFailed = true
+		fmt.Printf("FAIL workflowRun %q\n", res.runName)
+		for _, e := range res.errs {
+			fmt.Printf("     %s\n", e.String())
+		}
+	}
+
 	if anyFailed {
 		os.Exit(1)
 	}
@@ -271,49 +287,40 @@ func checkWorkflow(
 		}
 	}
 
-	// Check 6: WorkflowRef and AgentRef existence (cluster mode only).
+	// Check 6: WorkflowRef, AgentRef, StepTemplateRef (direct and forEach), and
+	// MCPToolCall.server existence (only run when a control-plane client is available --
+	// cluster mode, or local --workflow-dir mode via the fake client the loader builds).
+	// References declared inside an inline step.ForEach.Step are NOT checked here -- see the
+	// validate command's Long help for that documented gap.
 	if k8sClient != nil {
-		ns := getNamespace()
 		seen := make(map[string]struct{})
 		for _, step := range wf.Spec.Steps {
-			if step.WorkflowRef != nil && step.WorkflowRef.Name != "" {
-				key := "wf/" + step.WorkflowRef.Name
-				if _, ok := seen[key]; !ok {
-					seen[key] = struct{}{}
-					var ref ottoflowv1alpha1.Workflow
-					refNS := step.WorkflowRef.Namespace
-					if refNS == "" {
-						refNS = ns
-					}
-					nn := types.NamespacedName{Namespace: refNS, Name: step.WorkflowRef.Name}
-					if err := k8sClient.Get(ctx, nn, &ref); err != nil {
-						if apierrors.IsNotFound(err) {
-							errs = append(errs, validationError{
-								code:    "REF_NOT_FOUND",
-								step:    step.Name,
-								message: fmt.Sprintf("workflowRef %q not found in namespace %q", step.WorkflowRef.Name, refNS),
-							})
-						}
-					}
+			for _, ref := range collectStepReferences(&step) {
+				refNS := ref.namespace
+				if refNS == "" {
+					refNS = wf.Namespace
 				}
-			}
-			if step.AgentRef != nil && step.AgentRef.Name != "" {
-				key := "agent/" + step.AgentRef.Name
-				if _, ok := seen[key]; !ok {
-					seen[key] = struct{}{}
-					var ref ottoflowv1alpha1.Agent
-					refNS := step.AgentRef.Namespace
-					if refNS == "" {
-						refNS = ns
-					}
-					if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: refNS, Name: step.AgentRef.Name}, &ref); err != nil {
-						if apierrors.IsNotFound(err) {
-							errs = append(errs, validationError{
-								code:    "REF_NOT_FOUND",
-								step:    step.Name,
-								message: fmt.Sprintf("agentRef %q not found in namespace %q", step.AgentRef.Name, refNS),
-							})
-						}
+				dedupKey := ref.kind + "/" + refNS + "/" + ref.name
+				if _, ok := seen[dedupKey]; ok {
+					continue
+				}
+				seen[dedupKey] = struct{}{}
+
+				obj, err := newRefObject(ref.kind)
+				if err != nil {
+					// Unreachable given collectStepReferences only emits known kinds, but
+					// fail loudly rather than silently skip a check if that ever changes.
+					errs = append(errs, validationError{code: "REF_NOT_FOUND", step: step.Name, message: err.Error()})
+					continue
+				}
+				nn := types.NamespacedName{Namespace: refNS, Name: ref.name}
+				if getErr := k8sClient.Get(ctx, nn, obj); getErr != nil {
+					if apierrors.IsNotFound(getErr) {
+						errs = append(errs, validationError{
+							code:    "REF_NOT_FOUND",
+							step:    step.Name,
+							message: fmt.Sprintf("%s %q not found in namespace %q", refLabel(ref.kind), ref.name, refNS),
+						})
 					}
 				}
 			}
@@ -321,6 +328,44 @@ func checkWorkflow(
 	}
 
 	return errs
+}
+
+// workflowRunRefCheck is one WorkflowRun's static ref-check result: the run's own name, plus
+// any validationErrors found (currently only REF_NOT_FOUND against workflowRef).
+type workflowRunRefCheck struct {
+	runName string
+	errs    []validationError
+}
+
+// checkWorkflowRunRefs verifies every WorkflowRun exec loaded has a workflowRef that resolves
+// to a Workflow exec also loaded. This is a separate pass from checkWorkflow because
+// checkWorkflow only ever walks a loaded Workflow's own steps -- it never sees a WorkflowRun
+// whose workflowRef names a Workflow that was not loaded at all (typo, wrong namespace,
+// missing file), which would otherwise only fail at run time.
+//
+// Uses each run's ResolvedNamespace, not lr.Run.Namespace: indexWorkflowRuns force-defaults
+// the latter to "default" for any run that declared no namespace anywhere, which would
+// misreport a run the loader actually rebound into the Workflow's real namespace (e.g.
+// "ottoflow") as broken.
+func checkWorkflowRunRefs(ctx context.Context, exec *cliexec.LocalWorkflowExecutor) []workflowRunRefCheck {
+	var results []workflowRunRefCheck
+	for _, lr := range exec.ListWorkflowRuns() {
+		var wf ottoflowv1alpha1.Workflow
+		wfName := lr.Run.Spec.WorkflowRef.Name
+		key := types.NamespacedName{Namespace: lr.ResolvedNamespace, Name: wfName}
+		if err := exec.ControlClient().Get(ctx, key, &wf); err != nil {
+			if apierrors.IsNotFound(err) {
+				results = append(results, workflowRunRefCheck{
+					runName: lr.Run.Name,
+					errs: []validationError{{
+						code:    "REF_NOT_FOUND",
+						message: fmt.Sprintf("workflowRef %q not found in namespace %q", wfName, lr.ResolvedNamespace),
+					}},
+				})
+			}
+		}
+	}
+	return results
 }
 
 // loadWorkflowForValidation loads a Workflow from file, directory, or cluster.
@@ -341,7 +386,7 @@ func loadWorkflowForValidation(ctx context.Context, args []string) (*ottoflowv1a
 			return nil, nil, fmt.Errorf("load workflow dir: %w", err)
 		}
 		wf, err := exec.GetWorkflow(ctx, name, getNamespace())
-		return wf, nil, err
+		return wf, exec.ControlClient(), err
 	}
 
 	// Cluster mode.
@@ -464,6 +509,75 @@ func loadWorkflowFromFile(filePath string) (*ottoflowv1alpha1.Workflow, error) {
 	}
 	sort.Strings(otherKinds)
 	return nil, &noWorkflowInFileError{path: filePath, otherKinds: otherKinds, parseErr: firstParseErr}
+}
+
+// stepRef identifies one static reference a step makes to another OttoFlow CRD, discovered
+// so checkWorkflow's Check 6 can verify the referenced object actually exists.
+type stepRef struct {
+	kind      string // "Workflow", "Agent", "StepTemplate", or "MCPServer"
+	name      string
+	namespace string // as declared on the reference itself; "" means "defer to wf.Namespace"
+}
+
+// collectStepReferences returns every reference declaration on step that names another
+// OttoFlow CRD by kind/name/namespace: workflowRef, agentRef, the direct stepTemplateRef step
+// type, forEach.stepTemplateRef, and mcpToolCall.server. References declared inside an inline
+// step.ForEach.Step are intentionally NOT collected -- they are only known once the forEach's
+// items expression is evaluated at run time, so they cannot be statically resolved here.
+func collectStepReferences(step *ottoflowv1alpha1.Step) []stepRef {
+	var refs []stepRef
+	if step.WorkflowRef != nil && step.WorkflowRef.Name != "" {
+		refs = append(refs, stepRef{kind: "Workflow", name: step.WorkflowRef.Name, namespace: step.WorkflowRef.Namespace})
+	}
+	if step.AgentRef != nil && step.AgentRef.Name != "" {
+		refs = append(refs, stepRef{kind: "Agent", name: step.AgentRef.Name, namespace: step.AgentRef.Namespace})
+	}
+	if tplRef := step.StepTemplateRef; tplRef != nil && tplRef.Name != "" {
+		refs = append(refs, stepRef{kind: "StepTemplate", name: tplRef.Name, namespace: tplRef.Namespace})
+	}
+	if step.ForEach != nil {
+		if tplRef := step.ForEach.StepTemplateRef; tplRef != nil && tplRef.Name != "" {
+			refs = append(refs, stepRef{kind: "StepTemplate", name: tplRef.Name, namespace: tplRef.Namespace})
+		}
+	}
+	if step.MCPToolCall != nil && step.MCPToolCall.Server != "" {
+		// server is a bare name with no namespace field of its own; it always defers to wf.Namespace.
+		refs = append(refs, stepRef{kind: "MCPServer", name: step.MCPToolCall.Server})
+	}
+	return refs
+}
+
+// refLabel returns the field name to show in a validationError message for one reference kind.
+func refLabel(kind string) string {
+	switch kind {
+	case "Workflow":
+		return "workflowRef"
+	case "Agent":
+		return "agentRef"
+	case "StepTemplate":
+		return "stepTemplateRef"
+	case "MCPServer":
+		return "mcpToolCall.server"
+	default:
+		return kind
+	}
+}
+
+// newRefObject returns a zero-value typed client.Object for kind, so k8sClient.Get can decode
+// into the correct CRD type. kind must be one collectStepReferences emits.
+func newRefObject(kind string) (client.Object, error) {
+	switch kind {
+	case "Workflow":
+		return &ottoflowv1alpha1.Workflow{}, nil
+	case "Agent":
+		return &ottoflowv1alpha1.Agent{}, nil
+	case "StepTemplate":
+		return &ottoflowv1alpha1.StepTemplate{}, nil
+	case "MCPServer":
+		return &ottoflowv1alpha1.MCPServer{}, nil
+	default:
+		return nil, fmt.Errorf("internal error: unknown reference kind %q", kind)
+	}
 }
 
 // collectCELExpressions returns only the fields of a step that are definitively CEL

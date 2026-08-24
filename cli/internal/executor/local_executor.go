@@ -317,6 +317,36 @@ func objectKey(obj client.Object) string {
 	return fmt.Sprintf("%s/%s/%s", reflect.TypeOf(obj).String(), ns, obj.GetName())
 }
 
+// ControlClient returns the fake control-plane client the loader populated from the loaded
+// manifests, so callers outside this package (e.g. `ottoflow validate`) can run the same
+// reference-existence checks the local executor itself relies on.
+func (e *LocalWorkflowExecutor) ControlClient() client.Client {
+	return e.controlClient
+}
+
+// LoadedWorkflowRun pairs a loaded WorkflowRun with the namespace the loader
+// resolved it into (recovered from the index key), which is the namespace the
+// runtime uses to find its Workflow. This can differ from Run.Namespace, which
+// indexWorkflowRuns force-defaults to "default".
+// NOTE: the index map keys by resolvedNs + "/" + workflowRef.Name, so two runs
+// referencing the same Workflow in one namespace collide last-wins -- this list
+// therefore under-reports such duplicates (a benign under-check, never a false positive).
+type LoadedWorkflowRun struct {
+	ResolvedNamespace string
+	Run               *ottoflowv1alpha1.WorkflowRun
+}
+
+// ListWorkflowRuns returns every loaded WorkflowRun paired with the namespace the loader
+// resolved it into.
+func (e *LocalWorkflowExecutor) ListWorkflowRuns() []LoadedWorkflowRun {
+	out := make([]LoadedWorkflowRun, 0, len(e.workflowRuns))
+	for key, wr := range e.workflowRuns {
+		resolvedNS := strings.TrimSuffix(key, "/"+wr.Spec.WorkflowRef.Name)
+		out = append(out, LoadedWorkflowRun{ResolvedNamespace: resolvedNS, Run: wr})
+	}
+	return out
+}
+
 // GetWorkflow returns a Workflow by name and namespace from the loaded manifests.
 func (e *LocalWorkflowExecutor) GetWorkflow(ctx context.Context, name, namespace string) (*ottoflowv1alpha1.Workflow, error) {
 	if e.controlClient == nil {

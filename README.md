@@ -92,15 +92,13 @@ For details on the data collection, analysis, and reporting view the [worklflow 
 set an API key and run it by path, no cloning or `--workflow-dir` needed:
 
 ```sh
-GEMINI_API_KEY=AQ... \
-  --provider gemini \
-  --model gemini-3.6-flash \
+GEMINI_API_KEY=AIza... \
   ottoflow run -f https://raw.githubusercontent.com/nirmata/ottoflow/main/samples/workflows/production/pod-triage.yaml
 ```
 
 Use <https://aistudio.google.com/api-keys> to get an API key.
 
-Prefer OpenAI, Gemini, or no cloud key at all? Override with `--provider`/`--model`
+Prefer OpenAI, Anthropic, or no cloud key at all? Override with `--provider`/`--model`
 and the matching environment variable — no editing the workflow required:
 
 ```sh
@@ -110,8 +108,8 @@ OPENAI_API_KEY=sk-... \
 ```
 
 ```sh
-# Anthropic -- ANTHROPIC_API_KEY must be set; --model optional (defaults to a current Gemini model)
-ANTHROPIC_API_KEY=ak-... \
+# Anthropic -- ANTHROPIC_API_KEY must be set; --model optional (defaults to a current Claude model)
+ANTHROPIC_API_KEY=sk-ant-... \
   ottoflow run samples/workflows/production/pod-triage.yaml -n ottoflow --provider anthropic
 ```
 

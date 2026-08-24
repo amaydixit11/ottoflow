@@ -15,23 +15,23 @@ spec:
     pod specs or logs. Several pods may be unhealthy for different reasons. Pick the SINGLE
     highest-priority pod to fix first, say why in one sentence, and give ONE concrete next
     action.
-  modelProvider: anthropic
+  modelProvider: gemini
   # This Agent's own modelProvider/modelName are just the default -- override them per run
   # with --provider/--model (local execution only), no editing this file required:
   #
-  #   # Anthropic (default) -- ANTHROPIC_API_KEY must be set; --model optional (defaults
-  #   # to a current Claude model).
-  #   ANTHROPIC_API_KEY=sk-ant-... \
+  #   # Gemini (default) -- GEMINI_API_KEY must be set; --model optional (defaults to a
+  #   # current Gemini model). Get a key at https://aistudio.google.com/api-keys.
+  #   GEMINI_API_KEY=AIza... \
   #     ottoflow run pod-triage --workflow-dir samples -n ottoflow
   #
   #   # OpenAI -- OPENAI_API_KEY must be set; --model optional (defaults to gpt-4o).
   #   OPENAI_API_KEY=sk-... \
   #     ottoflow run pod-triage --workflow-dir samples -n ottoflow --provider openai
   #
-  #   # Gemini -- GEMINI_API_KEY must be set; --model optional (defaults to a current
-  #   # Gemini model).
-  #   GEMINI_API_KEY=... \
-  #     ottoflow run pod-triage --workflow-dir samples -n ottoflow --provider gemini
+  #   # Anthropic -- ANTHROPIC_API_KEY must be set; --model optional (defaults to a
+  #   # current Claude model).
+  #   ANTHROPIC_API_KEY=sk-ant-... \
+  #     ottoflow run pod-triage --workflow-dir samples -n ottoflow --provider anthropic
   #
   #   # Local -- a llama.cpp-compatible server (llama.cpp, ollama, vLLM, LM Studio).
   #   # The server address comes from the LLAMACPP_HOST env var, not spec.config.

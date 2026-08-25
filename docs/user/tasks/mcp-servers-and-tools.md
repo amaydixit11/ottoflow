@@ -7,6 +7,10 @@ This guide explains how to configure **MCP (Model Context Protocol) servers** in
 - **MCPServer** – A Custom Resource that defines how to connect to an MCP server (transport, address, auth, timeout). You create one MCPServer per MCP backend.
 - **MCP tool call step** – A workflow step that invokes a single MCP tool by name, with arguments resolved from the workflow context. No LLM is involved; the step calls the tool directly and exposes the result as `toolResult`.
 
+This guide is about OttoFlow as an MCP *client*. For the other direction — serving this
+cluster's Workflows as tools an agent framework can call — see
+[Serving Workflows as MCP Tools](workflows-as-mcp-tools.md).
+
 MCP servers can be used in two ways in OttoFlow:
 
 1. **Direct tool calls** – Use the `mcpToolCall` step type to call a specific tool with CEL-resolved arguments. The result is available as `toolResult` in that step’s outputs.

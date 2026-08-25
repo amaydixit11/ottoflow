@@ -1,0 +1,23 @@
+{{- if and .Values.controller.mcp .Values.controller.mcp.enabled .Values.controller.mcp.service .Values.controller.mcp.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-mcp
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: mcp
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controller.mcp.service.type }}
+  selector:
+    {{- include "ottoflow.selectorLabels.n6" . }}
+  ports:
+    - name: mcp
+      port: {{ .Values.controller.mcp.service.port }}
+      targetPort: mcp
+      protocol: TCP
+{{- end }}

@@ -25,6 +25,13 @@ import (
 // the agent executor uses SubjectAccessReview against this permission to allow callers.
 const AgentExecutorCallerResourceName = "agent-executor-caller"
 
+// MCPCallerResourceName is the virtual ConfigMap name behind "who may invoke a
+// workflow as an MCP tool". It is deliberately not AgentExecutorCallerResourceName:
+// calling the agent executor and running any workflow in the cluster are
+// different grants, and one ClusterRole for both would make the narrower one
+// impossible to give out.
+const MCPCallerResourceName = "mcp-caller"
+
 type contextKey string
 
 const serviceAccountContextKey contextKey = "serviceAccount"

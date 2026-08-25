@@ -1,0 +1,21 @@
+{{- if and .Values.controller.mcp .Values.controller.mcp.enabled .Values.rbac.create }}
+# ClusterRole for "who can invoke a workflow as an MCP tool". The MCP server
+# checks this permission with SubjectAccessReview after TokenReview establishes
+# the caller's identity. Bind it to the ServiceAccount of each agent framework
+# allowed to call workflows — kagent's, for example.
+#
+# Deliberately separate from agent-executor-caller: calling the agent executor
+# and running any workflow in the cluster are different grants.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-mcp-caller
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: mcp-caller
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["mcp-caller"]
+    verbs: ["get"]
+{{- end }}

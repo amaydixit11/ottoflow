@@ -90,6 +90,11 @@ The following table lists the configurable parameters and their default values:
 | `controller.podLabels` | Pod labels | `{}` |
 | `controller.env` | Extra environment variables | `[]` |
 | `controller.args` | Command arguments (flags); chart injects runner image, RBAC roles, and agent-executor flags automatically | `["--leader-elect"]` |
+| `controller.mcp.enabled` | Serve the cluster's Workflows as MCP tools (`--mcp-addr`) | `false` |
+| `controller.mcp.addr` | Listen address for the MCP server; the endpoint is `/mcp` | `:8084` |
+| `controller.mcp.service.enabled` | Create a Service for the MCP port | `true` |
+| `controller.mcp.service.type` | MCP Service type | `ClusterIP` |
+| `controller.mcp.service.port` | MCP Service port | `8084` |
 | `controller.livenessProbe` | Liveness probe config | See values.yaml |
 | `controller.readinessProbe` | Readiness probe config | See values.yaml |
 | `controller.terminationGracePeriodSeconds` | Termination grace period | `10` |

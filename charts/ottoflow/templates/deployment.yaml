@@ -86,6 +86,10 @@ spec:
         {{- if and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled }}
         - --webhook-trigger-addr={{ .Values.controller.webhookTrigger.addr | default ":8083" }}
         {{- end }}
+        {{- if and .Values.controller.mcp .Values.controller.mcp.enabled }}
+        - --mcp-addr={{ .Values.controller.mcp.addr | default ":8084" }}
+        - --mcp-caller-namespace={{ include "ottoflow.namespace" . }}
+        {{- end }}
         {{- if .Values.agentExecutor.enabled }}
         - --agent-executor-caller-cluster-role={{ printf "%s-agent-executor-caller" (include "ottoflow.fullname" .) }}
         - --agent-executor-service-name={{ include "ottoflow.agentExecutor.fullname" . }}
@@ -129,7 +133,7 @@ spec:
           {{- toYaml .Values.controller.readinessProbe | nindent 10 }}
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
-        {{- if or .Values.webhook.enabled (and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled) }}
+        {{- if or .Values.webhook.enabled (and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled) (and .Values.controller.mcp .Values.controller.mcp.enabled) }}
         ports:
         {{- if .Values.webhook.enabled }}
           - containerPort: 9443
@@ -139,6 +143,11 @@ spec:
         {{- if and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled }}
           - containerPort: 8083
             name: webhook-trigger
+            protocol: TCP
+        {{- end }}
+        {{- if and .Values.controller.mcp .Values.controller.mcp.enabled }}
+          - containerPort: {{ (splitList ":" (.Values.controller.mcp.addr | default ":8084")) | last | int }}
+            name: mcp
             protocol: TCP
         {{- end }}
         {{- end }}

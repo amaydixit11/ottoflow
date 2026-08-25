@@ -24,6 +24,11 @@ type WorkflowSpec struct {
 	// +optional
 	Inputs []Input `json:"inputs,omitempty"`
 
+	// MCPTool exposes this workflow to MCP clients as a callable tool.
+	// Omitted or disabled keeps the workflow off the MCP endpoint entirely.
+	// +optional
+	MCPTool *MCPTool `json:"mcpTool,omitempty"`
+
 	// Variables defines top-level CEL expressions that are evaluated before steps execute.
 	// Variables are shared across all steps and can reference inputs and other variables.
 	// Variables are evaluated sequentially, allowing later variables to reference earlier ones.
@@ -117,6 +122,40 @@ type EventConfig struct {
 	// +kubebuilder:default=WorkflowAndSteps
 	// +optional
 	Level string `json:"level,omitempty"`
+}
+
+// MCPTool exposes a workflow as a tool an MCP client can call, which lets an
+// agent framework run it. Exposure is per workflow and opt-in: an endpoint
+// that runs every workflow in the cluster is not something a workflow author
+// should get by default.
+type MCPTool struct {
+	// Enabled exposes this workflow on the MCP endpoint. The endpoint itself
+	// must also be running (the controller's --mcp-addr); this field decides
+	// whether this workflow is one of the tools it serves.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Description is what an MCP client shows a model when it decides whether
+	// to call this workflow. It is the whole basis for that decision, so write
+	// it for that reader: what the workflow does, and when to reach for it.
+	// Defaults to a sentence built from the workflow's name.
+	// +optional
+	Description string `json:"description,omitempty"`
+}
+
+// IsEnabled reports whether the workflow is exposed as an MCP tool. Nil is the
+// common case — most workflows never opt in — so the nil check lives here
+// rather than at each call site.
+func (m *MCPTool) IsEnabled() bool {
+	return m != nil && m.Enabled
+}
+
+// GetDescription returns the configured description, or empty when unset.
+func (m *MCPTool) GetDescription() string {
+	if m == nil {
+		return ""
+	}
+	return m.Description
 }
 
 // Input defines a workflow input parameter

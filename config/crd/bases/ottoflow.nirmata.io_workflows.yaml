@@ -3364,6 +3364,25 @@ spec:
                   - name
                   type: object
                 type: array
+              mcpTool:
+                description: |-
+                  MCPTool exposes this workflow to MCP clients as a callable tool.
+                  Omitted or disabled keeps the workflow off the MCP endpoint entirely.
+                properties:
+                  description:
+                    description: |-
+                      Description is what an MCP client shows a model when it decides whether
+                      to call this workflow. It is the whole basis for that decision, so write
+                      it for that reader: what the workflow does, and when to reach for it.
+                      Defaults to a sentence built from the workflow's name.
+                    type: string
+                  enabled:
+                    description: |-
+                      Enabled exposes this workflow on the MCP endpoint. The endpoint itself
+                      must also be running (the controller's --mcp-addr); this field decides
+                      whether this workflow is one of the tools it serves.
+                    type: boolean
+                type: object
               outputs:
                 description: |-
                   Outputs defines workflow-level outputs that are evaluated at completion

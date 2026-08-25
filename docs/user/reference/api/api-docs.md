@@ -519,6 +519,26 @@ _Appears in:_
 | `availableTools` _string array_ | AvailableTools is a list of tools available from this MCP server |  | Optional: \{\} <br /> |
 
 
+#### MCPTool
+
+
+
+MCPTool exposes a workflow as a tool an MCP client can call, which lets an
+agent framework run it. Exposure is per workflow and opt-in: an endpoint
+that runs every workflow in the cluster is not something a workflow author
+should get by default.
+
+
+
+_Appears in:_
+- [WorkflowSpec](#workflowspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled exposes this workflow on the MCP endpoint. The endpoint itself<br />must also be running (the controller's --mcp-addr); this field decides<br />whether this workflow is one of the tools it serves. |  | Optional: \{\} <br /> |
+| `description` _string_ | Description is what an MCP client shows a model when it decides whether<br />to call this workflow. It is the whole basis for that decision, so write<br />it for that reader: what the workflow does, and when to reach for it.<br />Defaults to a sentence built from the workflow's name. |  | Optional: \{\} <br /> |
+
+
 #### MatchCondition
 
 
@@ -1642,6 +1662,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `inputs` _[Input](#input) array_ | Inputs defines input parameters for the workflow template.<br />Values are provided when creating a WorkflowRun. |  | Optional: \{\} <br /> |
+| `mcpTool` _[MCPTool](#mcptool)_ | MCPTool exposes this workflow to MCP clients as a callable tool.<br />Omitted or disabled keeps the workflow off the MCP endpoint entirely. |  | Optional: \{\} <br /> |
 | `variables` _[Variable](#variable) array_ | Variables defines top-level CEL expressions that are evaluated before steps execute.<br />Variables are shared across all steps and can reference inputs and other variables.<br />Variables are evaluated sequentially, allowing later variables to reference earlier ones.<br />Access variables in expressions using: variables.<name> |  | Optional: \{\} <br /> |
 | `steps` _[Step](#step) array_ | Steps defines the workflow steps to execute. |  | MinItems: 1 <br /> |
 | `outputs` _[Output](#output) array_ | Outputs defines workflow-level outputs that are evaluated at completion<br />and added to the WorkflowRun status for observability |  | Optional: \{\} <br /> |

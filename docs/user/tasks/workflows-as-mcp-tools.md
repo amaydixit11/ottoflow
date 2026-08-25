@@ -8,16 +8,41 @@ where a workflow step calls someone else's MCP server.
 The controller is the MCP **client** there and the MCP **server** here. Both can be on
 at once; they share nothing but the protocol.
 
+## Opting a workflow in
+
+Exposure is per workflow. A workflow is not a tool until it says so:
+
+```yaml
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: namespace-report
+spec:
+  mcpTool:
+    enabled: true
+    description: >-
+      Summarize the workloads running in a Kubernetes namespace: how many pods,
+      which are unhealthy, and what images they run. Use when asked what is
+      running somewhere.
+```
+
+Two gates have to line up: the endpoint has to be running (`--mcp-addr`, below) and
+the workflow has to be enabled. Neither alone exposes anything, and turning the endpoint
+on does not turn every workflow in the cluster into a callable tool.
+
 ## What a caller sees
 
-One tool per Workflow, named `<namespace>__<workflow>`:
+One tool per opted-in Workflow, named `<namespace>__<workflow>`:
 
-- `tools/list` enumerates the Workflows the server can see, with each workflow's inputs
-  as the tool's input schema.
+- `tools/list` enumerates the opted-in Workflows, with each workflow's inputs as the
+  tool's input schema.
 - `tools/call` creates a WorkflowRun, waits for it, and returns its outputs.
 
-The tool set follows the cluster. A Workflow created a second ago is callable; one that
-was deleted stops being listed, rather than remaining as a tool whose call would fail.
+The tool set follows the cluster, rebuilt on each request. A Workflow created a second
+ago is callable; one that was deleted, edited, or opted back out is reflected on the next
+`tools/list` rather than serving the definition it had when it first appeared. A workflow that opts out
+stops being callable at the same moment it stops being listed: a client calling a name it
+saw earlier gets `tool not found`.
 
 ## Enabling it
 
@@ -56,24 +81,12 @@ and one role for both would make the narrower one impossible to give out.
 
 ## Describing a workflow for a model
 
-`WorkflowSpec` has no description field, so the tool description comes from an
-annotation:
-
-```yaml
-apiVersion: ottoflow.nirmata.io/v1alpha1
-kind: Workflow
-metadata:
-  name: namespace-report
-  annotations:
-    ottoflow.nirmata.io/description: >-
-      Summarize the workloads running in a Kubernetes namespace: how many pods,
-      which are unhealthy, and what images they run.
-```
-
-Without it the tool still lists, with a description generated from the workflow's name.
-That is enough for a human reading `tools/list` and thin for a model choosing between
-tools — the annotation is the difference between a workflow that gets called at the
-right moment and one that does not.
+`spec.mcpTool.description` is what an MCP client shows a model when it chooses between
+tools. Leave it out and the tool still lists, with a description generated from the
+workflow's name — enough for a human reading `tools/list`, thin for a model choosing.
+It is the difference between a workflow that gets called at the right moment and one
+that does not, so write it for that reader: what the workflow does, and when to reach
+for it.
 
 ## Inputs
 

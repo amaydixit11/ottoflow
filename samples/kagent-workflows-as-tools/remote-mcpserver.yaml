@@ -45,22 +45,24 @@ spec:
     - name: Authorization
       value: "Bearer $(KAGENT_SA_TOKEN)"
 ---
-# 3. A workflow to call, described for the model that will choose it.
+# 3. A workflow that opts in, described for the model that will choose it.
 #
-# WorkflowSpec has no description field, so the tool description comes from this
-# annotation. It is the only thing an agent sees when deciding whether this
-# workflow is the right tool for a request — write it for that reader.
+# Exposure is per workflow: without spec.mcpTool.enabled this workflow is not a
+# tool, however the endpoint is configured. The description is the only thing an
+# agent sees when deciding whether this workflow answers a request — write it
+# for that reader.
 apiVersion: ottoflow.nirmata.io/v1alpha1
 kind: Workflow
 metadata:
   name: namespace-report
   namespace: ottoflow
-  annotations:
-    ottoflow.nirmata.io/description: >-
+spec:
+  mcpTool:
+    enabled: true
+    description: >-
       Summarize the workloads running in a Kubernetes namespace: how many pods,
       which are unhealthy, and what images they run. Use when asked what is
       running somewhere or why a namespace looks unhealthy.
-spec:
   inputs:
     - name: namespace
       description: The namespace to report on

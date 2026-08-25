@@ -71,10 +71,13 @@ func NewMCPToolServer(c client.Client, authenticator Authenticator, addr string)
 		pollInterval:  defaultMCPPollInterval,
 	}
 
-	// listChanged is advertised because the tool set follows the Workflows in
-	// the cluster rather than a fixed registry.
+	// listChanged is not advertised. The tool set does follow the Workflows in
+	// the cluster, but the transport below is stateless: there is no session to
+	// push a notification to, so claiming the capability would promise a
+	// notification that can never arrive. Every tools/list is rebuilt from the
+	// cache instead, so a client that re-lists is never stale.
 	s.mcp = mcpserver.NewMCPServer(mcpServerName, mcpServerVersion,
-		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithRecovery(),
 	)
 

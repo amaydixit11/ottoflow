@@ -58,8 +58,9 @@ func newWorkflow(namespace, name string, inputs ...ottoflowv1alpha1.Input) *otto
 	return &ottoflowv1alpha1.Workflow{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: ottoflowv1alpha1.WorkflowSpec{
-			Inputs: inputs,
-			Steps:  []ottoflowv1alpha1.Step{{Name: "noop"}},
+			Inputs:  inputs,
+			Steps:   []ottoflowv1alpha1.Step{{Name: "noop"}},
+			MCPTool: &ottoflowv1alpha1.MCPTool{Enabled: true},
 		},
 	}
 }
@@ -117,7 +118,7 @@ func TestWorkflowToolDerivesTheInputSchema(t *testing.T) {
 		ottoflowv1alpha1.Input{Name: "window", Description: "Look-back window", Default: "24h"},
 		ottoflowv1alpha1.Input{Name: "bare"},
 	)
-	wf.Annotations = map[string]string{DescriptionAnnotation: "Right-size workloads in a namespace."}
+	wf.Spec.MCPTool.Description = "Right-size workloads in a namespace."
 
 	tool := workflowTool(wf)
 
@@ -125,7 +126,7 @@ func TestWorkflowToolDerivesTheInputSchema(t *testing.T) {
 		t.Errorf("tool name = %q", tool.Name)
 	}
 	if tool.Description != "Right-size workloads in a namespace." {
-		t.Errorf("description = %q, want the annotation", tool.Description)
+		t.Errorf("description = %q, want the configured one", tool.Description)
 	}
 	if diff := cmp.Diff([]string{"namespace"}, tool.InputSchema.Required); diff != "" {
 		t.Errorf("required inputs (-want +got):\n%s", diff)
@@ -157,8 +158,8 @@ func TestWorkflowToolDerivesTheInputSchema(t *testing.T) {
 	}
 }
 
-// A workflow with no description annotation still has to say something: an MCP
-// client showing an empty description gives a model nothing to choose on.
+// A workflow that sets no description still has to say something: an MCP client
+// showing an empty description gives a model nothing to choose on.
 func TestWorkflowToolFallsBackToAGeneratedDescription(t *testing.T) {
 	tool := workflowTool(newWorkflow("team-a", "nightly-report"))
 	if tool.Description == "" {
@@ -500,5 +501,70 @@ func assertToolError(t *testing.T, result *mcp.CallToolResult, want string) {
 	}
 	if !strings.Contains(textOf(result), want) {
 		t.Errorf("tool error = %q, want it to contain %q", textOf(result), want)
+	}
+}
+
+// Exposure is opt-in per workflow: a workflow that has not asked to be a tool
+// is neither listed nor callable by name.
+func TestOnlyOptedInWorkflowsAreExposed(t *testing.T) {
+	exposed := newWorkflow("default", "exposed")
+	private := newWorkflow("default", "private")
+	private.Spec.MCPTool = nil
+	disabled := newWorkflow("default", "disabled")
+	disabled.Spec.MCPTool = &ottoflowv1alpha1.MCPTool{Enabled: false}
+
+	s := newTestMCPServer(t, exposed, private, disabled)
+	if err := s.syncTools(context.Background()); err != nil {
+		t.Fatalf("syncTools: %v", err)
+	}
+	if diff := cmp.Diff([]string{"default__exposed"}, registeredToolNames(s)); diff != "" {
+		t.Errorf("exposed tools (-want +got):\n%s", diff)
+	}
+
+	// Calling the handler directly is the only way to reach this check: an
+	// unexposed workflow is absent from the registry, so a real request is
+	// refused by the transport first. What is asserted here is the guard for
+	// the window between the registry being rebuilt and the run being created.
+	for _, name := range []string{"default__private", "default__disabled"} {
+		result, err := s.callWorkflow(context.Background(), callToolRequest(name, nil))
+		if err != nil {
+			t.Fatalf("callWorkflow(%s): %v", name, err)
+		}
+		assertToolError(t, result, "not exposed as an MCP tool")
+	}
+}
+
+// An edited workflow has to change its tool. A registry that only adds and
+// removes by name serves the definition captured when the workflow first
+// appeared, so a renamed input or a rewritten description never reaches a
+// client.
+func TestSyncToolsRefreshesAnEditedWorkflow(t *testing.T) {
+	wf := newWorkflow("default", "wf", ottoflowv1alpha1.Input{Name: "namespace", Required: true})
+	wf.Spec.MCPTool.Description = "The first description."
+	s := newTestMCPServer(t, wf)
+	ctx := context.Background()
+
+	if err := s.syncTools(ctx); err != nil {
+		t.Fatalf("syncTools: %v", err)
+	}
+
+	wf.Spec.MCPTool.Description = "The second description."
+	wf.Spec.Inputs = append(wf.Spec.Inputs, ottoflowv1alpha1.Input{Name: "window", Default: "24h"})
+	if err := s.client.Update(ctx, wf); err != nil {
+		t.Fatalf("updating workflow: %v", err)
+	}
+	if err := s.syncTools(ctx); err != nil {
+		t.Fatalf("syncTools: %v", err)
+	}
+
+	tool := s.mcp.GetTool("default__wf")
+	if tool == nil {
+		t.Fatal("tool disappeared after the workflow was updated")
+	}
+	if tool.Tool.Description != "The second description." {
+		t.Errorf("description = %q, want the edited one", tool.Tool.Description)
+	}
+	if _, ok := tool.Tool.InputSchema.Properties["window"]; !ok {
+		t.Errorf("input added to the workflow is missing from the schema: %v", tool.Tool.InputSchema.Properties)
 	}
 }

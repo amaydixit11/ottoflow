@@ -27,12 +27,6 @@ import (
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
 )
 
-// DescriptionAnnotation carries the sentence an MCP client shows a model when
-// it decides whether to call a workflow. WorkflowSpec has no description
-// field, and the tool description is the whole basis for that decision, so an
-// author needs somewhere to write one.
-const DescriptionAnnotation = "ottoflow.nirmata.io/description"
-
 // toolNameSeparator joins a Workflow's namespace and name into one tool name.
 // Two underscores, because a namespace and a name are DNS-1123 labels and can
 // hold neither: the split back is unambiguous for every legal pair.
@@ -67,7 +61,7 @@ func splitToolName(tool string) (namespace, name string, ok bool) {
 // richer JSON-schema types here would describe a contract the executor does
 // not enforce, since InputValues is map[string]string on the way in.
 func workflowTool(wf *ottoflowv1alpha1.Workflow) mcp.Tool {
-	description := strings.TrimSpace(wf.Annotations[DescriptionAnnotation])
+	description := strings.TrimSpace(wf.Spec.MCPTool.GetDescription())
 	if description == "" {
 		// A name is a poor description, but an empty one is worse: a client
 		// that shows nothing gives the model no basis to choose this tool.
@@ -118,39 +112,21 @@ func (s *MCPToolServer) syncTools(ctx context.Context) error {
 		return fmt.Errorf("listing workflows: %w", err)
 	}
 
-	want := make(map[string]mcp.Tool, len(workflows.Items))
+	tools := make([]mcpserver.ServerTool, 0, len(workflows.Items))
 	for i := range workflows.Items {
 		wf := &workflows.Items[i]
-		want[toolName(wf.Namespace, wf.Name)] = workflowTool(wf)
-	}
-
-	have := s.mcp.ListTools()
-
-	var added []mcpserver.ServerTool
-	for name, tool := range want {
-		if _, exists := have[name]; exists {
+		if !wf.Spec.MCPTool.IsEnabled() {
 			continue
 		}
-		added = append(added, mcpserver.ServerTool{Tool: tool, Handler: s.callWorkflow})
+		tools = append(tools, mcpserver.ServerTool{Tool: workflowTool(wf), Handler: s.callWorkflow})
 	}
-	// Deterministic order so a listChanged notification does not depend on map
-	// iteration.
-	sort.Slice(added, func(i, j int) bool { return added[i].Tool.Name < added[j].Tool.Name })
-	if len(added) > 0 {
-		s.mcp.AddTools(added...)
-	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Tool.Name < tools[j].Tool.Name })
 
-	var removed []string
-	for name := range have {
-		if _, exists := want[name]; !exists {
-			removed = append(removed, name)
-		}
-	}
-	if len(removed) > 0 {
-		sort.Strings(removed)
-		s.mcp.DeleteTools(removed...)
-	}
-
+	// Replace the set rather than reconcile it. Diffing would have to notice
+	// that an edited workflow's inputs or description changed, and a tool
+	// definition that silently describes the previous edit is worse than the
+	// cost of rebuilding a list this size.
+	s.mcp.SetTools(tools...)
 	return nil
 }
 
@@ -169,6 +145,14 @@ func (s *MCPToolServer) callWorkflow(ctx context.Context, req mcp.CallToolReques
 			return mcp.NewToolResultErrorf("workflow %s/%s not found", namespace, name), nil
 		}
 		return nil, fmt.Errorf("reading workflow %s/%s: %w", namespace, name, err)
+	}
+
+	// A workflow that is not exposed is already absent from the registry, so
+	// the transport rejects the name before this runs. This covers the window
+	// between the two: the registry was rebuilt at the start of the request,
+	// and opting out is one write away at any point after that.
+	if !wf.Spec.MCPTool.IsEnabled() {
+		return mcp.NewToolResultErrorf("workflow %s/%s is not exposed as an MCP tool", namespace, name), nil
 	}
 
 	inputs, err := inputValues(&wf, req.GetArguments())

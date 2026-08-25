@@ -113,6 +113,23 @@ controller:
       type: ClusterIP
       port: 8083
 
+  # MCP server. Serves the Workflows in the cluster as MCP tools, so an agent
+  # framework (kagent, or any MCP client) can call a workflow as a tool.
+  # Callers present a ServiceAccount token; authorization is RBAC, via the
+  # mcp-caller ClusterRole below. TLS terminates at an ingress or a service
+  # mesh sidecar — the server itself listens on plain HTTP, like the webhook
+  # trigger.
+  mcp:
+    # enabled controls whether --mcp-addr is passed to the controller. Disabled
+    # means no listener and no endpoint.
+    enabled: false
+    # addr is the listen address for the MCP server. The endpoint is /mcp.
+    addr: ":8084"
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8084
+
   # Liveness probe configuration
   livenessProbe:
     httpGet:

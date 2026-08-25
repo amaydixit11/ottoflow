@@ -29,6 +29,7 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	"github.com/nirmata/ottoflow/internal/auth"
 	"github.com/nirmata/ottoflow/internal/certmanager"
 	_ "github.com/nirmata/ottoflow/internal/metrics" // Register Prometheus metrics
 	"github.com/nirmata/ottoflow/internal/tracing"
@@ -82,6 +83,8 @@ func main() {
 	var workflowRunnerTTLSecondsAfterFinished int
 	var workflowRunnerLLMCredentialsSecret string
 	var webhookTriggerAddr string
+	var mcpAddr string
+	var mcpCallerNamespace string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -144,6 +147,11 @@ func main() {
 	webhookConfigName := envOrDefault("WEBHOOK_CONFIG_NAME", "ottoflow-validating")
 
 	logConfig := textlogger.NewConfig()
+	flag.StringVar(&mcpAddr, "mcp-addr", "",
+		"The address the MCP server binds to, serving Workflows as MCP tools. Empty disables it.")
+	flag.StringVar(&mcpCallerNamespace, "mcp-caller-namespace", "",
+		"Namespace holding the mcp-caller ConfigMap that SubjectAccessReview checks for MCP callers. "+
+			"Defaults to --namespace.")
 	logConfig.AddFlags(flag.CommandLine)
 	flag.Parse()
 
@@ -266,6 +274,28 @@ func main() {
 		)
 		if err := mgr.Add(webhookTriggerServer); err != nil {
 			setupLog.Error(err, "unable to add webhook trigger server to manager")
+			os.Exit(1)
+		}
+	}
+
+	// Serve Workflows as MCP tools. Callers authenticate with a ServiceAccount
+	// token and are authorized by RBAC, the same model the agent executor uses.
+	if mcpAddr != "" {
+		callerNamespace := mcpCallerNamespace
+		if callerNamespace == "" {
+			callerNamespace = namespace
+		}
+		mcpToolServer, err := workflowcontroller.NewMCPToolServer(
+			mgr.GetClient(),
+			auth.NewTokenReviewAndSARAuthenticator(clientset, callerNamespace, auth.MCPCallerResourceName),
+			mcpAddr,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to create MCP server")
+			os.Exit(1)
+		}
+		if err := mgr.Add(mcpToolServer); err != nil {
+			setupLog.Error(err, "unable to add MCP server to manager")
 			os.Exit(1)
 		}
 	}

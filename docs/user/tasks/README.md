@@ -7,6 +7,7 @@ Step-by-step guides for common tasks with OttoFlow.
 - [Installation](installation.md) - Install OttoFlow via Helm or manifests
 - [Getting Started](getting-started.md) - Create your first workflow
 - [MCP Servers and Tool Calls](mcp-servers-and-tools.md) - Configure MCP servers and call MCP tools from workflow steps
+- [Serving Workflows as MCP Tools](workflows-as-mcp-tools.md) - Let an agent framework call your workflows as tools
 - [Triggers](triggers.md) - Setting up cron, event, and webhook triggers
 - [Custom Metrics](custom-metrics.md) - Defining custom Prometheus metrics from workflows
 

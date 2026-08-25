@@ -1,0 +1,105 @@
+---
+# Let a kagent Agent call OttoFlow Workflows as tools.
+#
+# Written against kagent v0.10.x (CRD group kagent.dev, storage version v1alpha2).
+# This is the inverse of samples/kagent-quickstart, where OttoFlow calls kagent:
+# here kagent calls OttoFlow.
+#
+# Prerequisites: kagent running in the cluster, and OttoFlow installed with
+#   --set controller.mcp.enabled=true
+#
+# Apply into the namespace kagent runs in.
+
+# 1. Authorize kagent to invoke workflows.
+#
+# The MCP server authenticates the caller's ServiceAccount token and then asks
+# SubjectAccessReview whether that identity may get the mcp-caller ConfigMap.
+# This binding is what makes the answer yes; deleting it revokes access with no
+# restart and no secret to rotate.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kagent-ottoflow-mcp-caller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ottoflow-mcp-caller
+subjects:
+  - kind: ServiceAccount
+    name: kagent
+    namespace: kagent
+---
+# 2. Point kagent at the OttoFlow MCP endpoint.
+#
+# Every Workflow the server can see becomes one tool, named <namespace>__<workflow>.
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: ottoflow-workflows
+  namespace: kagent
+spec:
+  description: OttoFlow workflows, callable as tools.
+  protocol: STREAMABLE_HTTP
+  url: http://ottoflow-mcp.ottoflow.svc.cluster.local:8084/mcp
+  headersFrom:
+    - name: Authorization
+      value: "Bearer $(KAGENT_SA_TOKEN)"
+---
+# 3. A workflow to call, described for the model that will choose it.
+#
+# WorkflowSpec has no description field, so the tool description comes from this
+# annotation. It is the only thing an agent sees when deciding whether this
+# workflow is the right tool for a request — write it for that reader.
+apiVersion: ottoflow.nirmata.io/v1alpha1
+kind: Workflow
+metadata:
+  name: namespace-report
+  namespace: ottoflow
+  annotations:
+    ottoflow.nirmata.io/description: >-
+      Summarize the workloads running in a Kubernetes namespace: how many pods,
+      which are unhealthy, and what images they run. Use when asked what is
+      running somewhere or why a namespace looks unhealthy.
+spec:
+  inputs:
+    - name: namespace
+      description: The namespace to report on
+      required: true
+    - name: includeImages
+      description: Whether to list container images
+      default: "true"
+  steps:
+    - name: summarize
+      message: Summarize the namespace
+      expressions:
+        - name: summary
+          expression: |
+            "Reporting on namespace " + inputs.namespace +
+            (inputs.includeImages == "true" ? " including container images" : "")
+  outputs:
+    - name: summary
+      expression: "variables.summary"
+---
+# 4. The agent, with the workflow tool attached.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: namespace-analyst
+  namespace: kagent
+spec:
+  type: Declarative
+  description: Answers questions about what is running in a namespace.
+  declarative:
+    modelConfig: anthropic-model
+    systemMessage: |
+      You answer questions about Kubernetes namespaces.
+      Call the ottoflow namespace-report tool rather than guessing, and quote
+      the numbers it returns.
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: ottoflow-workflows
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          toolNames:
+            - ottoflow__namespace-report

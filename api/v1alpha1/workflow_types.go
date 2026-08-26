@@ -73,6 +73,53 @@ type WorkflowSpec struct {
 	// ExecutionLimits configures concurrency and rate limits for this workflow.
 	// +optional
 	ExecutionLimits *ExecutionLimits `json:"executionLimits,omitempty"`
+
+	// Expose publishes this Workflow to external agent surfaces (e.g. kagent). Presence of expose.kagent opts in.
+	// +optional
+	Expose *ExposeSpec `json:"expose,omitempty"`
+}
+
+// ExposeSpec configures external surfaces a Workflow is published to. Currently only kagent.
+type ExposeSpec struct {
+	// Kagent, when set, opts the Workflow into kagent (agent-to-agent) exposure via a kagent BYO Agent.
+	// +optional
+	Kagent *KagentExposeSpec `json:"kagent,omitempty"`
+}
+
+// GetKagent returns the kagent exposure spec, or nil when the Workflow does not opt into
+// kagent (A2A) exposure. Nil-safe on the pointer so callers can chain
+// wf.Spec.Expose.GetKagent() without a preceding nil check, the same way MCPTool does.
+func (e *ExposeSpec) GetKagent() *KagentExposeSpec {
+	if e == nil {
+		return nil
+	}
+	return e.Kagent
+}
+
+// IsKagentEnabled reports whether the Workflow opts into kagent (A2A) exposure. Nil is the
+// common case (most workflows never opt in), so the nil check lives here rather than at each
+// call site.
+func (e *ExposeSpec) IsKagentEnabled() bool {
+	return e.GetKagent() != nil
+}
+
+// KagentExposeSpec describes the kagent agent card metadata for a Workflow exposed via kagent.
+type KagentExposeSpec struct {
+	// DisplayName is a human-friendly name for the agent card. Defaults to the Workflow name.
+	// +optional
+	DisplayName string `json:"displayName,omitempty"`
+
+	// Description is a human-readable description of what the agent does.
+	// +optional
+	Description string `json:"description,omitempty"`
+
+	// Examples are sample prompts shown on the agent card.
+	// +optional
+	Examples []string `json:"examples,omitempty"`
+
+	// Tags are labels shown on the agent card for discovery.
+	// +optional
+	Tags []string `json:"tags,omitempty"`
 }
 
 // ExecutionLimits configures per-workflow concurrency and rate limits.

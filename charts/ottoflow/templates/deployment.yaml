@@ -80,6 +80,9 @@ spec:
         {{- if $runnerPullSecrets }}
         - --workflow-runner-image-pull-secrets={{ join "," $runnerPullSecrets }}
         {{- end }}
+        {{- if and .Values.controller.metrics .Values.controller.metrics.enabled }}
+        - --metrics-bind-address=:{{ .Values.controller.metrics.port | default 8080 }}
+        {{- end }}
         {{- if .Values.controller.prometheusURL }}
         - --prometheus-url={{ .Values.controller.prometheusURL }}
         {{- end }}
@@ -133,8 +136,13 @@ spec:
           {{- toYaml .Values.controller.readinessProbe | nindent 10 }}
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
-        {{- if or .Values.webhook.enabled (and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled) (and .Values.controller.mcp .Values.controller.mcp.enabled) }}
+        {{- if or .Values.webhook.enabled (and .Values.controller.webhookTrigger .Values.controller.webhookTrigger.enabled) (and .Values.controller.mcp .Values.controller.mcp.enabled) (and .Values.controller.metrics .Values.controller.metrics.enabled) }}
         ports:
+        {{- if and .Values.controller.metrics .Values.controller.metrics.enabled }}
+          - containerPort: {{ .Values.controller.metrics.port | default 8080 }}
+            name: metrics
+            protocol: TCP
+        {{- end }}
         {{- if .Values.webhook.enabled }}
           - containerPort: 9443
             name: webhook

@@ -98,7 +98,8 @@ The following table lists the configurable parameters and their default values:
 | `controller.livenessProbe` | Liveness probe config | See values.yaml |
 | `controller.readinessProbe` | Readiness probe config | See values.yaml |
 | `controller.terminationGracePeriodSeconds` | Termination grace period | `10` |
-| `controller.metrics.enabled` | Enable metrics | `true` |
+| `controller.metrics.enabled` | Enable metrics: `--metrics-bind-address`, a `metrics` container port, and a metrics Service | `true` |
+| `controller.metrics.port` | Port the controller serves `/metrics` on | `8080` |
 | `controller.metrics.serviceMonitor.enabled` | Enable ServiceMonitor | `false` |
 
 Controller configuration is passed via **command-line flags** (args). The chart injects `--workflow-runner-image`, `--workflow-runner-service-account`, `--workflow-runner-cluster-role`, and when agent-executor is enabled, `--agent-executor-caller-cluster-role` and (for internal TLS) `--agent-executor-service-name` and `--agent-executor-namespace`. Pass additional flags via `controller.args` (e.g. `--prometheus-url`, `--secret-source-namespace`). **Prometheus URL:** set `--prometheus-url=<url>` once in `controller.args`; the controller uses it and passes it to every workflow runner Job, so it is environment-specific and does not need to be in the workflow. See [Configuration Reference](../../docs/user/reference/configuration.md) for all controller flags.

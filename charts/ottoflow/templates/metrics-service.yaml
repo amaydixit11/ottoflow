@@ -1,0 +1,23 @@
+{{- if and .Values.controller.metrics .Values.controller.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ottoflow.fullname" . }}-metrics
+  namespace: {{ include "ottoflow.namespace" . }}
+  labels:
+    {{- include "ottoflow.labels.n4" . }}
+    app.kubernetes.io/component: metrics
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ottoflow.selectorLabels.n6" . }}
+  ports:
+    - name: metrics
+      port: {{ .Values.controller.metrics.port | default 8080 }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

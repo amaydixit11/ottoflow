@@ -113,6 +113,27 @@ controller:
       type: ClusterIP
       port: 8083
 
+  # Metrics configuration
+  metrics:
+    # Enable metrics
+    enabled: true
+    # Port the controller serves /metrics on.
+    port: 8080
+    # Service monitor for Prometheus
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+
+  # Prometheus URL used by workflows for CEL prometheusMetrics() queries.
+  # When set, the controller passes --prometheus-url to runner Jobs and the
+  # cost-analyzer workflow will prefer Prometheus over metrics-server for
+  # right-sizing data (windowed averages, single cluster-wide query).
+  # Leave empty to disable; cost-analyzer will fall back to metrics-server.
+  # Example: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  prometheusURL: ""
+
   # MCP server. Serves the Workflows in the cluster as MCP tools, so an agent
   # framework (kagent, or any MCP client) can call a workflow as a tool.
   # Callers present a ServiceAccount token; authorization is RBAC, via the
@@ -166,24 +187,6 @@ webhook:
   timeoutSeconds: 10
   annotations: {}
 
-  # Metrics configuration
-  metrics:
-    # Enable metrics
-    enabled: true
-    # Service monitor for Prometheus
-    serviceMonitor:
-      enabled: false
-      interval: 30s
-      scrapeTimeout: 10s
-      labels: {}
-
-  # Prometheus URL used by workflows for CEL prometheusMetrics() queries.
-  # When set, the controller passes --prometheus-url to runner Jobs and the
-  # cost-analyzer workflow will prefer Prometheus over metrics-server for
-  # right-sizing data (windowed averages, single cluster-wide query).
-  # Leave empty to disable; cost-analyzer will fall back to metrics-server.
-  # Example: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
-  prometheusURL: ""
 
 # Agent Executor Service configuration
 agentExecutor:

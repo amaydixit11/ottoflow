@@ -95,7 +95,7 @@ The controller is the main OttoFlow manager process (e.g. `controller` or `/ko-a
 | `--metrics-secure` | | `false` | Serve metrics over HTTPS |
 | `--enable-http2` | | `false` | Enable HTTP/2 on the metrics/webhook servers |
 | `--cel-cache-size` | | `1000` | Max compiled CEL expressions cached |
-| `--prometheus-url` | | (empty) | Prometheus server URL for CEL `prometheusMetrics()`. When set, the controller uses it and **passes it to every workflow runner Job**, so you configure it once per environment (e.g. in Helm `controller.args`) and it does not need to be in the workflow. |
+| `--prometheus-url` | | (empty) | Prometheus server URL for CEL `prometheusMetrics()`. When set, the controller uses it and **passes it to every workflow runner Job**, so you configure it once per environment (Helm `controller.prometheusURL`) and it does not need to be in the workflow. |
 | `--agent-executor-service-name` | `AGENT_EXECUTOR_SERVICE_NAME` | (empty) | Agent executor Service name for internal TLS cert controller |
 | `--agent-executor-namespace` | `AGENT_EXECUTOR_NAMESPACE` | `ottoflow` | Namespace for agent-executor TLS cert controller |
 | `--workflow-runner-image` | `WORKFLOW_RUNNER_IMAGE` | (see below) | Image for the workflow runner Job |
@@ -167,7 +167,7 @@ Nirmata credentials for LLM are used by the **workflow runner** when it executes
 
 ## Summary: when are environment variables needed?
 
-The **Helm chart** configures the controller with **flags only**; use `controller.args` for optional settings such as `--prometheus-url` or `--secret-source-namespace`. For **Nirmata credentials**: in-cluster use a Kubernetes Secret (reference in WorkflowRun `spec.execution.job.env` with `valueFrom.secretKeyRef`); for the CLI use environment variables (see table below).
+The **Helm chart** configures the controller with **flags only**; use `controller.prometheusURL` for the Prometheus URL, and `controller.args` for optional settings such as `--secret-source-namespace`. For **Nirmata credentials**: in-cluster use a Kubernetes Secret (reference in WorkflowRun `spec.execution.job.env` with `valueFrom.secretKeyRef`); for the CLI use environment variables (see table below).
 
 | Context | Env vars you might set |
 |--------|--------------------------|

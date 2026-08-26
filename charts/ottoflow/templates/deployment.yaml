@@ -82,6 +82,8 @@ spec:
         {{- end }}
         {{- if and .Values.controller.metrics .Values.controller.metrics.enabled }}
         - --metrics-bind-address=:{{ .Values.controller.metrics.port | default 8080 }}
+        {{- else }}
+        - --metrics-bind-address=0
         {{- end }}
         {{- if .Values.controller.prometheusURL }}
         - --prometheus-url={{ .Values.controller.prometheusURL }}

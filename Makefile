@@ -162,10 +162,10 @@ test-e2e: ## Run e2e tests (expects a kube cluster; use test-e2e-kind to create 
 	# try to reach a cluster. Dropping this tag makes the suite compile to zero tests and
 	# pass vacuously, so keep it in step with the //go:build lines in test/e2e.
 	# -timeout, because the Go default is 10m and this suite runs for ~9m30s:
-	# waits on cron fires give it no headroom. Kept under the workflow's
-	# timeout-minutes so a real hang panics with a goroutine dump instead of
-	# the runner killing the job with no output.
-	go test -tags e2e ./test/e2e/ -v -ginkgo.v -count=1 -timeout 25m
+	# waits on cron fires give it no headroom. Well under the workflow's
+	# timeout-minutes, which also has to cover setup, so a real hang panics
+	# with a goroutine dump instead of the runner killing the job silently.
+	go test -tags e2e ./test/e2e/ -v -ginkgo.v -count=1 -timeout 20m
 
 KIND_CLUSTER ?= kind
 .PHONY: test-e2e-kind

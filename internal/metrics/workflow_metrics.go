@@ -9,6 +9,7 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 const (
@@ -64,8 +65,9 @@ var (
 	)
 )
 
+// Registered on controller-runtime's registry, which is what /metrics serves.
 func init() {
-	prometheus.MustRegister(
+	ctrlmetrics.Registry.MustRegister(
 		WorkflowRunsTotal,
 		WorkflowRunDurationSeconds,
 		WorkflowStepsTotal,

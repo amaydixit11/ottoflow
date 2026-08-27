@@ -168,3 +168,76 @@ func TestSyncActiveClearsFinishedWorkflows(t *testing.T) {
 		t.Errorf("runs_active = %v, want 0", got)
 	}
 }
+
+// A run that fails partway leaves its downstream steps at Pending, because
+// every declared step is initialized before execution. Counting those as
+// failures would put steps that never ran into the failure rate.
+func TestRecordRunTransitionSkipsStepsThatNeverRan(t *testing.T) {
+	start := metav1.NewTime(time.Unix(3000, 0))
+	end := metav1.NewTime(time.Unix(3002, 0))
+	failed := run("r4", ottoflowv1alpha1.WorkflowRunPhaseFailed)
+	failed.Status.StepStatuses = map[string]ottoflowv1alpha1.StepStatus{
+		"ran":     {Phase: ottoflowv1alpha1.StepPhaseFailed, StartTime: &start, CompletionTime: &end},
+		"pending": {Phase: ottoflowv1alpha1.StepPhasePending},
+		"waiting": {Phase: ottoflowv1alpha1.StepPhaseWaiting},
+		"running": {Phase: ottoflowv1alpha1.StepPhaseRunning},
+	}
+
+	before := map[string]float64{}
+	for _, step := range []string{"pending", "waiting", "running"} {
+		before[step] = counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, "failed")
+	}
+	ranBefore := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", "ran", "failed")
+
+	recordRunTransition(run("r4", ottoflowv1alpha1.WorkflowRunPhaseRunning), failed)
+
+	for _, step := range []string{"pending", "waiting", "running"} {
+		if got := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, "failed"); got != before[step] {
+			t.Errorf("step %q counted as failed (%v), want unchanged at %v", step, got, before[step])
+		}
+	}
+	if got := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", "ran", "failed"); got != ranBefore+1 {
+		t.Errorf("the step that did fail = %v, want %v", got, ranBefore+1)
+	}
+}
+
+// A failing run is persisted with only an execution completion time, so
+// reading the top-level one alone drops the duration of every failure.
+func TestRecordRunTransitionUsesExecutionCompletionTime(t *testing.T) {
+	end := metav1.NewTime(time.Unix(1020, 0))
+	failed := run("r5", ottoflowv1alpha1.WorkflowRunPhaseFailed)
+	failed.Status.CompletionTime = nil
+	failed.Status.Execution = &ottoflowv1alpha1.WorkflowRunExecutionStatus{CompletionTime: &end}
+
+	before := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default")
+	recordRunTransition(run("r5", ottoflowv1alpha1.WorkflowRunPhaseRunning), failed)
+
+	if got := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default"); got != before+1 {
+		t.Errorf("failed run duration observations = %d, want %d", got, before+1)
+	}
+}
+
+// A workflow whose runs are all gone stops being reported, rather than holding
+// its last value for as long as the process lives.
+func TestSyncActiveDropsVanishedWorkflows(t *testing.T) {
+	running := run("e", ottoflowv1alpha1.WorkflowRunPhaseRunning)
+	k8s := fake.NewClientBuilder().WithScheme(newMCPTestScheme(t)).WithObjects(running).Build()
+	m := NewRunMetrics(nil, k8s)
+
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t, "wf", "default"); got != 1 {
+		t.Fatalf("runs_active = %v, want 1", got)
+	}
+
+	if err := k8s.Delete(context.Background(), running); err != nil {
+		t.Fatalf("deleting run: %v", err)
+	}
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t, "wf", "default"); got != 0 {
+		t.Errorf("runs_active = %v after the last run was deleted, want the series gone", got)
+	}
+}

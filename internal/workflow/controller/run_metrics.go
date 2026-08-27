@@ -33,10 +33,14 @@ const activeResyncInterval = 30 * time.Second
 type RunMetrics struct {
 	cache  ctrlcache.Cache
 	client client.Client
+	// seen is every label set the gauge has reported, so one whose runs have
+	// all been deleted can be dropped instead of reporting its last value
+	// forever. Only syncActive touches it, from one goroutine.
+	seen map[[2]string]struct{}
 }
 
 func NewRunMetrics(c ctrlcache.Cache, k8s client.Client) *RunMetrics {
-	return &RunMetrics{cache: c, client: k8s}
+	return &RunMetrics{cache: c, client: k8s, seen: map[[2]string]struct{}{}}
 }
 
 // NeedLeaderElection keeps one recorder per cluster. Counters are per-process,
@@ -87,16 +91,33 @@ func recordRunTransition(old, current *ottoflowv1alpha1.WorkflowRun) {
 
 	workflow, namespace := current.Spec.WorkflowRef.Name, current.Namespace
 	metrics.WorkflowRunsTotal.WithLabelValues(workflow, namespace, runResult(current)).Inc()
-	if d, ok := elapsed(current.Status.StartTime, current.Status.CompletionTime); ok {
+	if d, ok := elapsed(current.Status.StartTime, runCompletion(current)); ok {
 		metrics.WorkflowRunDurationSeconds.WithLabelValues(workflow, namespace).Observe(d)
 	}
 
 	for name, step := range current.Status.StepStatuses {
-		metrics.WorkflowStepsTotal.WithLabelValues(workflow, namespace, name, stepResult(step)).Inc()
+		result, ran := stepResult(step)
+		if !ran {
+			continue
+		}
+		metrics.WorkflowStepsTotal.WithLabelValues(workflow, namespace, name, result).Inc()
 		if d, ok := elapsed(step.StartTime, step.CompletionTime); ok {
 			metrics.WorkflowStepDurationSeconds.WithLabelValues(workflow, namespace, name).Observe(d)
 		}
 	}
+}
+
+// runCompletion is when the run finished. A failing run is persisted through
+// persistExecutionFailure, which sets only the execution completion time, so
+// reading the top-level one alone drops the duration of every failure.
+func runCompletion(run *ottoflowv1alpha1.WorkflowRun) *metav1.Time {
+	if run.Status.CompletionTime != nil {
+		return run.Status.CompletionTime
+	}
+	if run.Status.Execution != nil {
+		return run.Status.Execution.CompletionTime
+	}
+	return nil
 }
 
 // syncActive recomputes the active gauge from the cache. A gauge tracked by
@@ -121,6 +142,13 @@ func (m *RunMetrics) syncActive(ctx context.Context) error {
 	}
 	for key, count := range active {
 		metrics.WorkflowRunsActive.WithLabelValues(key[0], key[1]).Set(count)
+		m.seen[key] = struct{}{}
+	}
+	for key := range m.seen {
+		if _, present := active[key]; !present {
+			metrics.WorkflowRunsActive.DeleteLabelValues(key[0], key[1])
+			delete(m.seen, key)
+		}
 	}
 	return nil
 }
@@ -132,14 +160,20 @@ func runResult(run *ottoflowv1alpha1.WorkflowRun) string {
 	return "failed"
 }
 
-func stepResult(step ottoflowv1alpha1.StepStatus) string {
+// stepResult reports how a step ended, and whether it ended at all. Every
+// declared step is initialized to Pending before execution, so a run that fails
+// early leaves its downstream steps sitting there: counting those as failures
+// would put steps that never ran into the failure rate.
+func stepResult(step ottoflowv1alpha1.StepStatus) (result string, ran bool) {
 	switch step.Phase {
 	case ottoflowv1alpha1.StepPhaseSucceeded:
-		return "succeeded"
+		return "succeeded", true
 	case ottoflowv1alpha1.StepPhaseSkipped:
-		return "skipped"
+		return "skipped", true
+	case ottoflowv1alpha1.StepPhaseFailed:
+		return "failed", true
 	default:
-		return "failed"
+		return "", false
 	}
 }
 

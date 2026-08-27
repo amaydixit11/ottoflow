@@ -63,10 +63,10 @@ func histogramCount(t *testing.T, vec *prometheus.HistogramVec, labels ...string
 	return m.GetHistogram().GetSampleCount()
 }
 
-func gaugeValue(t *testing.T, workflow, namespace string) float64 {
+func gaugeValue(t *testing.T, namespace string) float64 {
 	t.Helper()
 	var m dto.Metric
-	g, err := metrics.WorkflowRunsActive.GetMetricWithLabelValues(workflow, namespace)
+	g, err := metrics.WorkflowRunsActive.GetMetricWithLabelValues("wf", namespace)
 	if err != nil {
 		t.Fatalf("gauge: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSyncActiveCountsRunningRuns(t *testing.T) {
 	if err := m.syncActive(context.Background()); err != nil {
 		t.Fatalf("syncActive: %v", err)
 	}
-	if got := gaugeValue(t, "wf", "default"); got != 2 {
+	if got := gaugeValue(t, "default"); got != 2 {
 		t.Errorf("runs_active = %v, want 2", got)
 	}
 }
@@ -164,7 +164,7 @@ func TestSyncActiveClearsFinishedWorkflows(t *testing.T) {
 	if err := m.syncActive(context.Background()); err != nil {
 		t.Fatalf("syncActive: %v", err)
 	}
-	if got := gaugeValue(t, "wf", "default"); got != 0 {
+	if got := gaugeValue(t, "default"); got != 0 {
 		t.Errorf("runs_active = %v, want 0", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestSyncActiveDropsVanishedWorkflows(t *testing.T) {
 	if err := m.syncActive(context.Background()); err != nil {
 		t.Fatalf("syncActive: %v", err)
 	}
-	if got := gaugeValue(t, "wf", "default"); got != 1 {
+	if got := gaugeValue(t, "default"); got != 1 {
 		t.Fatalf("runs_active = %v, want 1", got)
 	}
 
@@ -237,7 +237,7 @@ func TestSyncActiveDropsVanishedWorkflows(t *testing.T) {
 	if err := m.syncActive(context.Background()); err != nil {
 		t.Fatalf("syncActive: %v", err)
 	}
-	if got := gaugeValue(t, "wf", "default"); got != 0 {
+	if got := gaugeValue(t, "default"); got != 0 {
 		t.Errorf("runs_active = %v after the last run was deleted, want the series gone", got)
 	}
 }

@@ -314,6 +314,12 @@ func main() {
 		}
 	}
 
+	runMetrics := workflowcontroller.NewRunMetrics(mgr.GetCache(), mgr.GetClient())
+	if err := mgr.Add(runMetrics); err != nil {
+		setupLog.Error(err, "unable to add run metrics recorder to manager")
+		os.Exit(1)
+	}
+
 	// Create metrics client (optional - gracefully handles if metrics server not available)
 	var metricsClient metricsclientset.Interface
 	metricsClient, err = metricsclientset.NewForConfig(mgr.GetConfig())

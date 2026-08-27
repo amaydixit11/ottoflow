@@ -440,7 +440,6 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 		workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseRunning
 		startNow := metav1.Now()
 		workflowRun.Status.StartTime = &startNow
-		metrics.WorkflowRunsActive.WithLabelValues(workflowName, namespace).Inc()
 		e.emitWorkflowLevelEvent(workflow, workflowRun, "WorkflowRunning", corev1.EventTypeNormal, "Workflow run started")
 	}
 
@@ -480,7 +479,7 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 				status := workflowRun.Status.StepStatuses[step.Name]
 				if status.Phase == ottoflowv1alpha1.StepPhaseFailed {
 					msg := fmt.Sprintf("Step %s failed: %s", step.Name, status.Error)
-					e.recordWorkflowFailure(workflow, workflowRun, workflowName, namespace, msg)
+					e.recordWorkflowFailure(workflow, workflowRun, msg)
 					return fmt.Errorf("workflow failed: step %s failed", step.Name)
 				}
 			}
@@ -514,7 +513,7 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 				if step.FailurePolicy == ottoflowv1alpha1.FailurePolicyContinue {
 					continue
 				}
-				e.recordWorkflowFailure(workflow, workflowRun, workflowName, namespace, fmt.Sprintf("Step %s failed: %v", stepName, err))
+				e.recordWorkflowFailure(workflow, workflowRun, fmt.Sprintf("Step %s failed: %v", stepName, err))
 				return fmt.Errorf("matchCondition evaluation failed for step %s: %w", stepName, err)
 			}
 
@@ -522,7 +521,6 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 				stepStatus.Phase = ottoflowv1alpha1.StepPhaseSkipped
 				workflowRun.Status.StepStatuses[stepName] = stepStatus
 				e.emitStepEvent(workflow, workflowRun, fmt.Sprintf("Step %q skipped (conditions not met)", stepName))
-				metrics.WorkflowStepsTotal.WithLabelValues(workflowName, namespace, stepName, "skipped").Inc()
 				e.invokeProgressCallback(workflowRun, workflow)
 				e.saveCheckpoint(ctx, workflowRun, stepName)
 				continue
@@ -585,10 +583,6 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 				stepStatus.CompletionTime = &completionTimeMeta
 				workflowRun.Status.StepStatuses[stepName] = stepStatus
 				e.emitStepEventWarning(workflow, workflowRun, fmt.Sprintf("Step %q failed: %s", stepName, err.Error()))
-				metrics.WorkflowStepsTotal.WithLabelValues(workflowName, namespace, stepName, "failed").Inc()
-				if stepStatus.StartTime != nil {
-					metrics.WorkflowStepDurationSeconds.WithLabelValues(workflowName, namespace, stepName).Observe(completionTime.Sub(stepStatus.StartTime.Time).Seconds())
-				}
 				e.invokeProgressCallback(workflowRun, workflow)
 
 				if step.FailurePolicy == ottoflowv1alpha1.FailurePolicyContinue {
@@ -596,7 +590,7 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 					continue
 				}
 
-				e.recordWorkflowFailure(workflow, workflowRun, workflowName, namespace, fmt.Sprintf("Step %s failed: %v", stepName, err))
+				e.recordWorkflowFailure(workflow, workflowRun, fmt.Sprintf("Step %s failed: %v", stepName, err))
 				return err
 			}
 			// Mark step as succeeded
@@ -613,10 +607,6 @@ func (e *WorkflowExecutor) ExecuteWorkflow(ctx context.Context, workflow *ottofl
 			}
 			workflowRun.Status.StepStatuses[stepName] = stepStatus
 			e.emitStepEvent(workflow, workflowRun, fmt.Sprintf("Step %q succeeded", stepName))
-			metrics.WorkflowStepsTotal.WithLabelValues(workflowName, namespace, stepName, "succeeded").Inc()
-			if stepStatus.StartTime != nil {
-				metrics.WorkflowStepDurationSeconds.WithLabelValues(workflowName, namespace, stepName).Observe(completionTime.Sub(stepStatus.StartTime.Time).Seconds())
-			}
 			e.invokeProgressCallback(workflowRun, workflow)
 			e.contextManager.RecordStepCompletion(stepName)
 			e.saveCheckpoint(ctx, workflowRun, stepName)
@@ -678,16 +668,11 @@ func (e *WorkflowExecutor) evaluateWorkflowVariables(ctx context.Context, workfl
 func (e *WorkflowExecutor) recordWorkflowFailure(
 	workflow *ottoflowv1alpha1.Workflow,
 	workflowRun *ottoflowv1alpha1.WorkflowRun,
-	workflowName, namespace, message string,
+	message string,
 ) {
 	workflowRun.Status.Phase = ottoflowv1alpha1.WorkflowRunPhaseFailed
 	workflowRun.Status.Message = message
 	e.emitWorkflowLevelEvent(workflow, workflowRun, "WorkflowFailed", corev1.EventTypeWarning, message)
-	metrics.WorkflowRunsActive.WithLabelValues(workflowName, namespace).Dec()
-	metrics.WorkflowRunsTotal.WithLabelValues(workflowName, namespace, "failed").Inc()
-	if workflowRun.Status.StartTime != nil {
-		metrics.WorkflowRunDurationSeconds.WithLabelValues(workflowName, namespace).Observe(time.Since(workflowRun.Status.StartTime.Time).Seconds())
-	}
 }
 
 func (e *WorkflowExecutor) recordWorkflowSuccess(
@@ -703,11 +688,6 @@ func (e *WorkflowExecutor) recordWorkflowSuccess(
 
 	if err := e.evaluateWorkflowOutputs(ctx, workflow, workflowRun, workflowName, namespace); err != nil {
 		fmt.Printf("Warning: failed to evaluate workflow outputs: %v\n", err)
-	}
-	metrics.WorkflowRunsActive.WithLabelValues(workflowName, namespace).Dec()
-	metrics.WorkflowRunsTotal.WithLabelValues(workflowName, namespace, "succeeded").Inc()
-	if workflowRun.Status.StartTime != nil {
-		metrics.WorkflowRunDurationSeconds.WithLabelValues(workflowName, namespace).Observe(now.Time.Sub(workflowRun.Status.StartTime.Time).Seconds())
 	}
 	e.invokeProgressCallback(workflowRun, workflow)
 }

@@ -85,7 +85,11 @@ func (m *RunMetrics) Start(ctx context.Context) error {
 // recordRunTransition records a run that has just reached a terminal phase,
 // and the steps it finished with.
 func recordRunTransition(old, current *ottoflowv1alpha1.WorkflowRun) {
-	if old.Status.Phase == current.Status.Phase || !runIsTerminal(current) {
+	// Only the crossing into a terminal phase counts. Requiring the old phase
+	// to be non-terminal keeps a terminal-to-terminal update from counting the
+	// run twice — a cron run marked Failed for Replace whose runner then
+	// persists Succeeded is one.
+	if runIsTerminal(old) || !runIsTerminal(current) {
 		return
 	}
 

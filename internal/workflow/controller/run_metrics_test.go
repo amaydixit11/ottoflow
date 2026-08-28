@@ -103,6 +103,15 @@ func TestRecordRunTransitionIgnoresRepeats(t *testing.T) {
 	if got := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "failed"); got != before {
 		t.Errorf("runs_total = %v, want it unchanged at %v", got, before)
 	}
+
+	// One terminal phase replacing another is still not a run finishing: a
+	// cron run marked Failed for Replace whose runner then persists Succeeded
+	// has already been counted.
+	succeededBefore := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded")
+	recordRunTransition(terminal, run("r2", ottoflowv1alpha1.WorkflowRunPhaseSucceeded))
+	if got := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded"); got != succeededBefore {
+		t.Errorf("runs_total[succeeded] = %v after a terminal-to-terminal change, want %v", got, succeededBefore)
+	}
 }
 
 // Step metrics come out of status, which is how they cross the runner Job

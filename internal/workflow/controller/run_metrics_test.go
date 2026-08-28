@@ -1,0 +1,252 @@
+/*
+Copyright 2026 Nirmata, Inc.
+
+Use of this source code is governed by the Business Source License 1.1
+that can be found in the LICENSE.md file.
+*/
+
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
+	"github.com/nirmata/ottoflow/internal/metrics"
+)
+
+func run(name string, phase ottoflowv1alpha1.WorkflowRunPhase) *ottoflowv1alpha1.WorkflowRun {
+	start := metav1.NewTime(time.Unix(1000, 0))
+	end := metav1.NewTime(time.Unix(1012, 0))
+	return &ottoflowv1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
+		Spec: ottoflowv1alpha1.WorkflowRunSpec{
+			WorkflowRef: ottoflowv1alpha1.WorkflowRef{Name: "wf", Namespace: "default"},
+		},
+		Status: ottoflowv1alpha1.WorkflowRunStatus{
+			Phase:          phase,
+			StartTime:      &start,
+			CompletionTime: &end,
+		},
+	}
+}
+
+func counterValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	c, err := vec.GetMetricWithLabelValues(labels...)
+	if err != nil {
+		t.Fatalf("counter %v: %v", labels, err)
+	}
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("writing counter %v: %v", labels, err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func histogramCount(t *testing.T, vec *prometheus.HistogramVec, labels ...string) uint64 {
+	t.Helper()
+	var m dto.Metric
+	o, err := vec.GetMetricWithLabelValues(labels...)
+	if err != nil {
+		t.Fatalf("histogram %v: %v", labels, err)
+	}
+	if err := o.(prometheus.Metric).Write(&m); err != nil {
+		t.Fatalf("writing histogram %v: %v", labels, err)
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
+func gaugeValue(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	g, err := metrics.WorkflowRunsActive.GetMetricWithLabelValues("wf", "default")
+	if err != nil {
+		t.Fatalf("gauge: %v", err)
+	}
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("writing gauge: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+func TestRecordRunTransition(t *testing.T) {
+	succeeded := run("r1", ottoflowv1alpha1.WorkflowRunPhaseSucceeded)
+	before := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded")
+	durations := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default")
+
+	recordRunTransition(run("r1", ottoflowv1alpha1.WorkflowRunPhaseRunning), succeeded)
+
+	if got := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded"); got != before+1 {
+		t.Errorf("runs_total = %v, want %v", got, before+1)
+	}
+	if got := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default"); got != durations+1 {
+		t.Errorf("run duration observations = %d, want %d", got, durations+1)
+	}
+}
+
+// Reaching a terminal phase is what counts, not being in one. A re-sent update
+// for an already-finished run must not count it twice.
+func TestRecordRunTransitionIgnoresRepeats(t *testing.T) {
+	terminal := run("r2", ottoflowv1alpha1.WorkflowRunPhaseFailed)
+	before := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "failed")
+
+	recordRunTransition(terminal, terminal)
+	recordRunTransition(run("r2", ottoflowv1alpha1.WorkflowRunPhaseRunning), run("r2", ottoflowv1alpha1.WorkflowRunPhaseRunning))
+
+	if got := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "failed"); got != before {
+		t.Errorf("runs_total = %v, want it unchanged at %v", got, before)
+	}
+
+	// One terminal phase replacing another is still not a run finishing: a
+	// cron run marked Failed for Replace whose runner then persists Succeeded
+	// has already been counted.
+	succeededBefore := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded")
+	recordRunTransition(terminal, run("r2", ottoflowv1alpha1.WorkflowRunPhaseSucceeded))
+	if got := counterValue(t, metrics.WorkflowRunsTotal, "wf", "default", "succeeded"); got != succeededBefore {
+		t.Errorf("runs_total[succeeded] = %v after a terminal-to-terminal change, want %v", got, succeededBefore)
+	}
+}
+
+// Step metrics come out of status, which is how they cross the runner Job
+// boundary at all.
+func TestRecordRunTransitionRecordsSteps(t *testing.T) {
+	start := metav1.NewTime(time.Unix(2000, 0))
+	end := metav1.NewTime(time.Unix(2003, 0))
+	finished := run("r3", ottoflowv1alpha1.WorkflowRunPhaseSucceeded)
+	finished.Status.StepStatuses = map[string]ottoflowv1alpha1.StepStatus{
+		"collect": {Phase: ottoflowv1alpha1.StepPhaseSucceeded, StartTime: &start, CompletionTime: &end},
+		"notify":  {Phase: ottoflowv1alpha1.StepPhaseSkipped},
+		"publish": {Phase: ottoflowv1alpha1.StepPhaseFailed, StartTime: &start, CompletionTime: &end},
+	}
+
+	base := map[string]float64{}
+	for step, result := range map[string]string{"collect": "succeeded", "notify": "skipped", "publish": "failed"} {
+		base[step] = counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, result)
+	}
+
+	recordRunTransition(run("r3", ottoflowv1alpha1.WorkflowRunPhaseRunning), finished)
+
+	for step, result := range map[string]string{"collect": "succeeded", "notify": "skipped", "publish": "failed"} {
+		if got := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, result); got != base[step]+1 {
+			t.Errorf("steps_total[%s=%s] = %v, want %v", step, result, got, base[step]+1)
+		}
+	}
+
+	// A skipped step never ran, so it has no duration to observe.
+	if got := histogramCount(t, metrics.WorkflowStepDurationSeconds, "wf", "default", "notify"); got != 0 {
+		t.Errorf("skipped step recorded %d duration observations, want 0", got)
+	}
+}
+
+func TestSyncActiveCountsRunningRuns(t *testing.T) {
+	k8s := fake.NewClientBuilder().WithScheme(newMCPTestScheme(t)).WithObjects(
+		run("a", ottoflowv1alpha1.WorkflowRunPhaseRunning),
+		run("b", ottoflowv1alpha1.WorkflowRunPhaseRunning),
+		run("c", ottoflowv1alpha1.WorkflowRunPhaseSucceeded),
+	).Build()
+	m := NewRunMetrics(nil, k8s)
+
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t); got != 2 {
+		t.Errorf("runs_active = %v, want 2", got)
+	}
+}
+
+// The gauge is recomputed rather than decremented, so a workflow whose runs
+// have all finished reads zero instead of holding its last value.
+func TestSyncActiveClearsFinishedWorkflows(t *testing.T) {
+	k8s := fake.NewClientBuilder().WithScheme(newMCPTestScheme(t)).WithObjects(
+		run("d", ottoflowv1alpha1.WorkflowRunPhaseSucceeded),
+	).Build()
+	m := NewRunMetrics(nil, k8s)
+
+	metrics.WorkflowRunsActive.WithLabelValues("wf", "default").Set(5)
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t); got != 0 {
+		t.Errorf("runs_active = %v, want 0", got)
+	}
+}
+
+// A run that fails partway leaves its downstream steps at Pending, because
+// every declared step is initialized before execution. Counting those as
+// failures would put steps that never ran into the failure rate.
+func TestRecordRunTransitionSkipsStepsThatNeverRan(t *testing.T) {
+	start := metav1.NewTime(time.Unix(3000, 0))
+	end := metav1.NewTime(time.Unix(3002, 0))
+	failed := run("r4", ottoflowv1alpha1.WorkflowRunPhaseFailed)
+	failed.Status.StepStatuses = map[string]ottoflowv1alpha1.StepStatus{
+		"ran":     {Phase: ottoflowv1alpha1.StepPhaseFailed, StartTime: &start, CompletionTime: &end},
+		"pending": {Phase: ottoflowv1alpha1.StepPhasePending},
+		"waiting": {Phase: ottoflowv1alpha1.StepPhaseWaiting},
+		"running": {Phase: ottoflowv1alpha1.StepPhaseRunning},
+	}
+
+	before := map[string]float64{}
+	for _, step := range []string{"pending", "waiting", "running"} {
+		before[step] = counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, "failed")
+	}
+	ranBefore := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", "ran", "failed")
+
+	recordRunTransition(run("r4", ottoflowv1alpha1.WorkflowRunPhaseRunning), failed)
+
+	for _, step := range []string{"pending", "waiting", "running"} {
+		if got := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", step, "failed"); got != before[step] {
+			t.Errorf("step %q counted as failed (%v), want unchanged at %v", step, got, before[step])
+		}
+	}
+	if got := counterValue(t, metrics.WorkflowStepsTotal, "wf", "default", "ran", "failed"); got != ranBefore+1 {
+		t.Errorf("the step that did fail = %v, want %v", got, ranBefore+1)
+	}
+}
+
+// A failing run is persisted with only an execution completion time, so
+// reading the top-level one alone drops the duration of every failure.
+func TestRecordRunTransitionUsesExecutionCompletionTime(t *testing.T) {
+	end := metav1.NewTime(time.Unix(1020, 0))
+	failed := run("r5", ottoflowv1alpha1.WorkflowRunPhaseFailed)
+	failed.Status.CompletionTime = nil
+	failed.Status.Execution = &ottoflowv1alpha1.WorkflowRunExecutionStatus{CompletionTime: &end}
+
+	before := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default")
+	recordRunTransition(run("r5", ottoflowv1alpha1.WorkflowRunPhaseRunning), failed)
+
+	if got := histogramCount(t, metrics.WorkflowRunDurationSeconds, "wf", "default"); got != before+1 {
+		t.Errorf("failed run duration observations = %d, want %d", got, before+1)
+	}
+}
+
+// A workflow whose runs are all gone stops being reported, rather than holding
+// its last value for as long as the process lives.
+func TestSyncActiveDropsVanishedWorkflows(t *testing.T) {
+	running := run("e", ottoflowv1alpha1.WorkflowRunPhaseRunning)
+	k8s := fake.NewClientBuilder().WithScheme(newMCPTestScheme(t)).WithObjects(running).Build()
+	m := NewRunMetrics(nil, k8s)
+
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t); got != 1 {
+		t.Fatalf("runs_active = %v, want 1", got)
+	}
+
+	if err := k8s.Delete(context.Background(), running); err != nil {
+		t.Fatalf("deleting run: %v", err)
+	}
+	if err := m.syncActive(context.Background()); err != nil {
+		t.Fatalf("syncActive: %v", err)
+	}
+	if got := gaugeValue(t); got != 0 {
+		t.Errorf("runs_active = %v after the last run was deleted, want the series gone", got)
+	}
+}

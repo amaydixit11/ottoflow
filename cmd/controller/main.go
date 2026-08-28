@@ -434,7 +434,9 @@ func main() {
 		Handler: admission.WithValidator(scheme, &ottowebhook.WorkflowValidator{Client: mgr.GetClient()}),
 	})
 	mgr.GetWebhookServer().Register(hookPathWorkflowRun, &ctrlwebhook.Admission{
-		Handler: admission.WithValidator(scheme, &ottowebhook.WorkflowRunValidator{}),
+		Handler: admission.WithValidator(scheme, &ottowebhook.WorkflowRunValidator{
+			Authorizer: clientset.AuthorizationV1().SubjectAccessReviews(),
+		}),
 	})
 	mgr.GetWebhookServer().Register(hookPathAgent, &ctrlwebhook.Admission{
 		Handler: admission.WithValidator(scheme, &ottowebhook.AgentValidator{}),

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
@@ -21,6 +22,9 @@ type WorkflowRunValidator struct {
 	// Authorizer decides whether the submitter may run as the ServiceAccount a
 	// run names. A nil Authorizer rejects every run that names one.
 	Authorizer SubjectAccessReviewer
+	// Client reads the run's Workflow, to tell a run that inherited its
+	// ServiceAccount from one that chose it.
+	Client client.Client
 }
 
 // ValidateCreate implements admission.Validator.

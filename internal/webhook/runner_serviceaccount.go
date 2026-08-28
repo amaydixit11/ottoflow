@@ -13,6 +13,7 @@ import (
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
@@ -43,18 +44,65 @@ type SubjectAccessReviewer interface {
 // credentials, which is what scoping the runner to its own least-privilege
 // role set out to prevent.
 func (v *WorkflowRunValidator) authorizeRunnerServiceAccount(ctx context.Context, run *ottoflowv1alpha1.WorkflowRun) error {
-	serviceAccount := runnerServiceAccountName(run)
+	serviceAccount := runnerServiceAccountName(run.Spec.Execution)
 	if serviceAccount == "" {
 		return nil
 	}
+	if v.inheritedFromWorkflow(ctx, run, serviceAccount) {
+		return nil
+	}
+	return authorizeUse(ctx, v.Authorizer, run.Namespace, serviceAccount, fmt.Sprintf("WorkflowRun %q", run.Name))
+}
 
-	if v.Authorizer == nil {
-		return fmt.Errorf("WorkflowRun %q sets spec.execution.job.serviceAccountName but the validator cannot authorize it", run.Name)
+// inheritedFromWorkflow reports whether this run is using the ServiceAccount
+// its Workflow declares rather than choosing one.
+//
+// The scheduler copies spec.execution from the Workflow into each run it
+// creates, and creates it as the controller, so reviewing the submitter would
+// ask whether the controller may use the account and reject every cron run.
+// The declaration was already authorized when the Workflow was admitted, and
+// every run of that Workflow uses that account anyway, so there is nothing
+// left to decide here.
+//
+// Same namespace only: the account is used in the run's namespace, and a
+// Workflow elsewhere was authorized against its own.
+func (v *WorkflowRunValidator) inheritedFromWorkflow(ctx context.Context, run *ottoflowv1alpha1.WorkflowRun, serviceAccount string) bool {
+	if v.Client == nil {
+		return false
+	}
+	if ns := run.Spec.WorkflowRef.Namespace; ns != "" && ns != run.Namespace {
+		return false
+	}
+
+	var workflow ottoflowv1alpha1.Workflow
+	key := client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.WorkflowRef.Name}
+	if err := v.Client.Get(ctx, key, &workflow); err != nil {
+		return false
+	}
+	return runnerServiceAccountName(workflow.Spec.Execution) == serviceAccount
+}
+
+// authorizeWorkflowServiceAccount checks the Workflow author may run as the
+// ServiceAccount the Workflow declares. This is where the account is chosen;
+// runs created from the Workflow inherit it.
+func (v *WorkflowValidator) authorizeWorkflowServiceAccount(ctx context.Context, workflow *ottoflowv1alpha1.Workflow) error {
+	serviceAccount := runnerServiceAccountName(workflow.Spec.Execution)
+	if serviceAccount == "" {
+		return nil
+	}
+	return authorizeUse(ctx, v.Authorizer, workflow.Namespace, serviceAccount, fmt.Sprintf("Workflow %q", workflow.Name))
+}
+
+// authorizeUse asks whether the identity behind this admission request may run
+// workloads as serviceAccount in namespace.
+func authorizeUse(ctx context.Context, authorizer SubjectAccessReviewer, namespace, serviceAccount, subject string) error {
+	if authorizer == nil {
+		return fmt.Errorf("%s sets spec.execution.job.serviceAccountName but the validator cannot authorize it", subject)
 	}
 
 	request, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		return fmt.Errorf("WorkflowRun %q sets spec.execution.job.serviceAccountName but the request carries no user to authorize: %w", run.Name, err)
+		return fmt.Errorf("%s sets spec.execution.job.serviceAccountName but the request carries no user to authorize: %w", subject, err)
 	}
 
 	extra := map[string]authorizationv1.ExtraValue{}
@@ -62,14 +110,14 @@ func (v *WorkflowRunValidator) authorizeRunnerServiceAccount(ctx context.Context
 		extra[key] = authorizationv1.ExtraValue(values)
 	}
 
-	review, err := v.Authorizer.Create(ctx, &authorizationv1.SubjectAccessReview{
+	review, err := authorizer.Create(ctx, &authorizationv1.SubjectAccessReview{
 		Spec: authorizationv1.SubjectAccessReviewSpec{
 			User:   request.UserInfo.Username,
 			UID:    request.UserInfo.UID,
 			Groups: request.UserInfo.Groups,
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace: run.Namespace,
+				Namespace: namespace,
 				Verb:      UseVerb,
 				Resource:  "serviceaccounts",
 				Name:      serviceAccount,
@@ -77,21 +125,21 @@ func (v *WorkflowRunValidator) authorizeRunnerServiceAccount(ctx context.Context
 		},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("WorkflowRun %q: checking whether %q may use serviceaccount %q: %w",
-			run.Name, request.UserInfo.Username, serviceAccount, err)
+		return fmt.Errorf("%s: checking whether %q may use serviceaccount %q: %w",
+			subject, request.UserInfo.Username, serviceAccount, err)
 	}
 	if !review.Status.Allowed {
-		return fmt.Errorf("WorkflowRun %q: %q may not use serviceaccount %q in namespace %q%s",
-			run.Name, request.UserInfo.Username, serviceAccount, run.Namespace, reviewReason(review))
+		return fmt.Errorf("%s: %q may not use serviceaccount %q in namespace %q%s",
+			subject, request.UserInfo.Username, serviceAccount, namespace, reviewReason(review))
 	}
 	return nil
 }
 
-func runnerServiceAccountName(run *ottoflowv1alpha1.WorkflowRun) string {
-	if run.Spec.Execution == nil || run.Spec.Execution.Job == nil {
+func runnerServiceAccountName(execution *ottoflowv1alpha1.WorkflowRunExecutionSpec) string {
+	if execution == nil || execution.Job == nil {
 		return ""
 	}
-	return run.Spec.Execution.Job.ServiceAccountName
+	return execution.Job.ServiceAccountName
 }
 
 func reviewReason(review *authorizationv1.SubjectAccessReview) string {

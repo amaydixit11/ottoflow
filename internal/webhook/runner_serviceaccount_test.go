@@ -17,6 +17,9 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	ottoflowv1alpha1 "github.com/nirmata/ottoflow/api/v1alpha1"
@@ -178,5 +181,112 @@ func TestRunnerServiceAccountFailsClosed(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func workflowWithServiceAccount(namespace, serviceAccount string) *ottoflowv1alpha1.Workflow {
+	wf := &ottoflowv1alpha1.Workflow{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "wf"},
+		Spec: ottoflowv1alpha1.WorkflowSpec{
+			Steps: []ottoflowv1alpha1.Step{{Name: "s1"}},
+		},
+	}
+	if serviceAccount != "" {
+		wf.Spec.Execution = &ottoflowv1alpha1.WorkflowRunExecutionSpec{
+			Job: &ottoflowv1alpha1.WorkflowRunJobSpec{ServiceAccountName: serviceAccount},
+		}
+	}
+	return wf
+}
+
+func clientWith(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := ottoflowv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("scheme: %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+}
+
+// The scheduler copies spec.execution from the Workflow into every cron run and
+// creates it as the controller, so reviewing the submitter would ask whether
+// the controller may use the account and reject every such run. The
+// declaration was authorized when the Workflow was admitted.
+func TestInheritedServiceAccountIsNotReviewedAgain(t *testing.T) {
+	reviewer := &fakeReviewer{allowed: false}
+	v := &WorkflowRunValidator{
+		Authorizer: reviewer,
+		Client:     clientWith(t, workflowWithServiceAccount("team-a", "build-runner")),
+	}
+
+	if _, err := v.ValidateCreate(requestContext(), runWithServiceAccount("build-runner")); err != nil {
+		t.Fatalf("run inheriting its Workflow's ServiceAccount rejected: %v", err)
+	}
+	if reviewer.got != nil {
+		t.Error("a review was issued for an inherited ServiceAccount")
+	}
+}
+
+// Inheriting is only a pass for the account the Workflow actually declares.
+func TestRunChoosingADifferentServiceAccountIsReviewed(t *testing.T) {
+	reviewer := &fakeReviewer{allowed: false}
+	v := &WorkflowRunValidator{
+		Authorizer: reviewer,
+		Client:     clientWith(t, workflowWithServiceAccount("team-a", "build-runner")),
+	}
+
+	if _, err := v.ValidateCreate(requestContext(), runWithServiceAccount("privileged-sa")); err == nil {
+		t.Fatal("a run naming an account its Workflow does not declare was admitted")
+	}
+	if reviewer.got == nil {
+		t.Error("no review was issued")
+	}
+}
+
+// The account is used in the run's namespace, so a Workflow elsewhere — which
+// was authorized against its own namespace — cannot vouch for it.
+func TestInheritanceDoesNotCrossNamespaces(t *testing.T) {
+	reviewer := &fakeReviewer{allowed: false}
+	run := runWithServiceAccount("build-runner")
+	run.Spec.WorkflowRef.Namespace = "team-b"
+	v := &WorkflowRunValidator{
+		Authorizer: reviewer,
+		Client:     clientWith(t, workflowWithServiceAccount("team-b", "build-runner")),
+	}
+
+	if _, err := v.ValidateCreate(requestContext(), run); err == nil {
+		t.Fatal("a run was admitted on the say-so of a Workflow in another namespace")
+	}
+}
+
+// The Workflow is where the account is chosen, so that is where its author is
+// authorized.
+func TestWorkflowServiceAccountRequiresAuthorization(t *testing.T) {
+	denied := &WorkflowValidator{Authorizer: &fakeReviewer{allowed: false, reason: "no binding"}}
+	_, err := denied.ValidateCreate(requestContext(), workflowWithServiceAccount("team-a", "privileged-sa"))
+	if err == nil {
+		t.Fatal("a Workflow declaring an unauthorized ServiceAccount was admitted")
+	}
+	for _, want := range []string{"Workflow", "alice", "privileged-sa", "team-a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	allowed := &WorkflowValidator{Authorizer: &fakeReviewer{allowed: true}}
+	if _, err := allowed.ValidateCreate(requestContext(), workflowWithServiceAccount("team-a", "build-runner")); err != nil {
+		t.Fatalf("authorized Workflow rejected: %v", err)
+	}
+}
+
+func TestWorkflowWithoutServiceAccountIsNotReviewed(t *testing.T) {
+	reviewer := &fakeReviewer{allowed: false}
+	v := &WorkflowValidator{Authorizer: reviewer}
+
+	if _, err := v.ValidateCreate(requestContext(), workflowWithServiceAccount("team-a", "")); err != nil {
+		t.Fatalf("Workflow without a ServiceAccount rejected: %v", err)
+	}
+	if reviewer.got != nil {
+		t.Error("a review was issued for a Workflow that declares no ServiceAccount")
 	}
 }

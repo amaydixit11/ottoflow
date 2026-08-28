@@ -158,5 +158,10 @@ rules:
 
 then bind it to the users or ServiceAccounts that submit those runs.
 
+A Workflow can declare the account instead, under `spec.execution.job`, and the
+same check runs when the Workflow is admitted — that is where the account is
+chosen. Runs created from it, including cron runs the scheduler creates, inherit
+the account and are not reviewed again.
+
 Runs that set no `serviceAccountName` are unaffected: they get the dedicated
 least-privilege runner account, and no review is issued.
